@@ -196,6 +196,11 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+# Scouts are read-only report tasks; they default to light so they do not spend
+# the guaranteed heavy budget, unless the caller pins a class explicitly.
+if [ "$KIND" = scout ] && [ "$RESOURCE_CLASS_SET" -eq 0 ]; then
+  RESOURCE_CLASS=light
+fi
 case "$RESOURCE_CLASS" in
   heavy|medium|light) ;;
   *) echo "error: --resource-class must be one of heavy, medium, light" >&2; exit 1 ;;
@@ -243,6 +248,7 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 RESOURCE_ADMISSION_LOCK=
 RESOURCE_ADMISSION_LOCK_HELD=0
+RESOURCE_RESERVATION_ID=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -317,7 +323,11 @@ spawn_abort_cleanup() {
   fi
   if [ "$RESOURCE_ADMISSION_LOCK_HELD" = 1 ]; then
     RESOURCE_ADMISSION_LOCK_HELD=0
-    rmdir "$RESOURCE_ADMISSION_LOCK" 2>/dev/null || true
+    fm_lock_release "$RESOURCE_ADMISSION_LOCK" || true
+  fi
+  if [ -n "$RESOURCE_RESERVATION_ID" ]; then
+    fm_resource_reservation_clear "$STATE" "$RESOURCE_RESERVATION_ID"
+    RESOURCE_RESERVATION_ID=
   fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
@@ -382,10 +392,21 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
       rc=2
       continue
-    elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+    fi
+    child_status=0
+    if [ "$KIND" = scout ]; then
+      FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout || child_status=$?
     else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" || child_status=$?
+    fi
+    # Exit 75 is the admission gate deferring the pair under back-pressure, not a
+    # failure: report it as queued and leave rc untouched so real failures in the
+    # same batch are not masked.
+    if [ "$child_status" -eq 75 ]; then
+      echo "batch: queued ${pair%%=*} (${pair#*=})"
+    elif [ "$child_status" -ne 0 ]; then
+      echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2
+      rc=1
     fi
   done
   exit "$rc"
@@ -397,8 +418,11 @@ fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; 
 if [ "$KIND" != secondmate ]; then
   RESOURCE_ADMISSION_LOCK="$STATE/.resource-admission.lock"
   mkdir -p "$STATE"
+  # Shared pid/steal lock protocol (bin/fm-wake-lib.sh), like SPAWN_TASK_LOCK: a
+  # SIGKILLed or rebooted holder is reclaimed via its dead pid instead of leaving
+  # a bare mkdir dir that would wedge every future spawn.
   resource_attempt=0
-  while ! mkdir "$RESOURCE_ADMISSION_LOCK" 2>/dev/null; do
+  until fm_lock_try_acquire "$RESOURCE_ADMISSION_LOCK"; do
     resource_attempt=$((resource_attempt + 1))
     [ "$resource_attempt" -lt 50 ] || {
       echo "error: resource admission lock remained busy" >&2
@@ -414,13 +438,23 @@ if [ "$KIND" != secondmate ]; then
       fm_resource_queue_write "$STATE" "$ID" "$@"
       echo "queued $ID resource_class=$RESOURCE_CLASS reason=memory-capacity"
     fi
-    rmdir "$RESOURCE_ADMISSION_LOCK"
     RESOURCE_ADMISSION_LOCK_HELD=0
+    fm_lock_release "$RESOURCE_ADMISSION_LOCK" || true
     exit 75
   fi
-  rmdir "$RESOURCE_ADMISSION_LOCK"
+  if [ "$status" -ne 0 ]; then
+    RESOURCE_ADMISSION_LOCK_HELD=0
+    fm_lock_release "$RESOURCE_ADMISSION_LOCK" || true
+    exit "$status"
+  fi
+  # Reserve the admitted slot BEFORE releasing the lock so a concurrent spawn
+  # counts it immediately - the meta that makes this task countable is not
+  # written until after treehouse/worktree acquisition and window creation, tens
+  # of seconds later. spawn_abort_cleanup clears the reservation on any exit.
+  fm_resource_reservation_write "$STATE" "$ID" "$RESOURCE_CLASS"
+  RESOURCE_RESERVATION_ID=$ID
   RESOURCE_ADMISSION_LOCK_HELD=0
-  [ "$status" -eq 0 ] || exit "$status"
+  fm_lock_release "$RESOURCE_ADMISSION_LOCK" || true
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then

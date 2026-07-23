@@ -145,6 +145,7 @@ set -u
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+ADMIT_QUEUED="${FM_ADMIT_QUEUED_OVERRIDE:-$FM_DAEMON_DIR/fm-admit-queued.sh}"
 
 # Shared tmux pane primitives for supervisor injection (busy/composer detection
 # + verify-retry submit). Sourced at top level so BOTH the executed daemon and
@@ -188,6 +189,8 @@ STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
+# Cadence for the durable resource-queue drain (job 4 in housekeeping).
+RESOURCE_DRAIN_SECS_DEFAULT=30
 # Max time a buffered escalation may sit undelivered before the daemon retries
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
@@ -1053,6 +1056,22 @@ housekeeping() {  # <state>
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
+  fi
+
+  # (4) resource-queue drain (cadence-gated). A heavy spawn the admission gate
+  #     deferred (exit 75) is durable but only admitted when a slot frees; drain
+  #     it here so supervision - not an operator - releases the back-pressure.
+  #     The drainer self-locks to one instance and re-execs fm-spawn.sh, which is
+  #     slow (worktree acquisition + window creation), so it runs fully detached
+  #     (double-fork; the transient launcher is reaped, the drain reparents to
+  #     init) and never blocks this tick or the daemon's watcher-exit detection.
+  if [ -x "$ADMIT_QUEUED" ] && [ -d "$state/resource-queue" ] \
+     && [ "$(_file_age "$state/.subsuper-last-drain")" -ge "${FM_RESOURCE_DRAIN_SECS:-$RESOURCE_DRAIN_SECS_DEFAULT}" ]; then
+    _now > "$state/.subsuper-last-drain"
+    # Double-fork: the foreground subshell backgrounds the drain and exits at
+    # once (reaped here, no zombie), leaving the drain reparented to init. The
+    # daemon never waits on the slow re-exec.
+    ( "$ADMIT_QUEUED" >/dev/null 2>&1 & )
   fi
 }
 

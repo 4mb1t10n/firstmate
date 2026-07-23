@@ -1,4 +1,36 @@
 name: Sync upstream into production
+#
+# Keep First Mate in the 4mb1t10n fork only: fork `main` stays a clean upstream
+# mirror, the deployed customization lives on fm/firstmate-resilience-64g, and
+# tested upstream updates are merged into that production branch without ever
+# overwriting it (conflicts and validation failures surface as a maintenance
+# issue instead).
+#
+# PREREQUISITES this workflow cannot encode itself (repository configuration):
+#
+#   1. Default branch. GitHub fires `schedule` and `workflow_dispatch` only for a
+#      workflow file present on the repository's DEFAULT branch. This file lives
+#      on fm/firstmate-resilience-64g, so the fork's default branch MUST be set
+#      to fm/firstmate-resilience-64g or this automation never runs and nothing
+#      surfaces the silence. Fork `main` remains the clean mirror, not the
+#      default branch.
+#
+#   2. FORK_SYNC_TOKEN secret. The default GITHUB_TOKEN cannot fast-forward
+#      `main` through `gh repo sync`, and GitHub rejects any token-authenticated
+#      push that creates or updates files under .github/workflows/ without the
+#      `workflows` permission - which is exactly what propagating upstream
+#      changes routinely does. Provide a fine-grained PAT or GitHub App token
+#      scoped to this repository with `contents: write` AND `workflows: write`
+#      stored as the FORK_SYNC_TOKEN secret. Every job that mutates a ref fails
+#      closed when it is absent.
+#
+# VALIDATION SCOPE. The validate job runs the SAME gate as
+# .github/workflows/ci.yml before anything is published: lint, the
+# coverage-partition guard, the portable parallel and serial lanes (with the tmux
+# preflight the serial lane needs), and the required real-Herdr family with its
+# full preflight - pinned Herdr and Treehouse, the protocol-floor assertion, the
+# default-session tripwire, and job-owned lab-session cleanup. An upstream change
+# reaches the production branch only after all of it passes.
 
 on:
   schedule:
@@ -19,15 +51,22 @@ jobs:
   mirror:
     name: Fast-forward fork main
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
       upstream_sha: ${{ steps.mirror.outputs.upstream_sha }}
     steps:
+      - name: Require fork sync token
+        env:
+          FORK_SYNC_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$FORK_SYNC_TOKEN" ] || {
+            echo "::error::FORK_SYNC_TOKEN secret is required (contents+workflows write); refusing to sync"
+            exit 1
+          }
       - name: Sync clean main mirror
         id: mirror
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
         run: |
           set -euo pipefail
           gh repo sync "$GITHUB_REPOSITORY" --branch main
@@ -38,9 +77,10 @@ jobs:
     name: Validate upstream integration
     needs: mirror
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     outputs:
       changed: ${{ steps.merge.outputs.changed }}
+      base_sha: ${{ steps.merge.outputs.base_sha }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -53,6 +93,11 @@ jobs:
           UPSTREAM_SHA: ${{ needs.mirror.outputs.upstream_sha }}
         run: |
           set -euo pipefail
+          # Record the exact production tip validate is about to test on, so
+          # publish can prove it merges onto the same tree (not a tip that moved
+          # during this window).
+          base_sha=$(git rev-parse HEAD)
+          printf 'base_sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
           git fetch origin main
           test "$(git rev-parse origin/main)" = "$UPSTREAM_SHA"
           if git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD; then
@@ -78,6 +123,15 @@ jobs:
       - name: Check regression partition
         if: steps.merge.outputs.changed == 'true'
         run: bin/fm-test-run.sh --check-coverage
+      - name: Require tmux for serial e2e lane
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          command -v tmux >/dev/null || {
+            echo "::error::tmux is required for real afk injection e2e coverage"
+            exit 1
+          }
+          tmux -V
       - name: Run portable regression lanes
         if: steps.merge.outputs.changed == 'true'
         run: |
@@ -85,24 +139,117 @@ jobs:
           bin/fm-test-run.sh --lane portable-parallel-1
           bin/fm-test-run.sh --lane portable-parallel-2
           bin/fm-test-run.sh --lane portable-serial
+      - name: Require tools for real Herdr
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
+          command -v python3 >/dev/null || { echo "::error::python3 is required"; exit 1; }
+          command -v curl >/dev/null || { echo "::error::curl is required"; exit 1; }
+          command -v tar >/dev/null || { echo "::error::tar is required"; exit 1; }
+      - name: Install pinned Herdr and Treehouse
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          bin/fm-install-herdr.sh "$RUNNER_TEMP/bin"
+          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Assert Herdr pin and protocol floor
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          command -v herdr >/dev/null || { echo "::error::herdr not on PATH after install"; exit 1; }
+          command -v treehouse >/dev/null || { echo "::error::treehouse not on PATH after install"; exit 1; }
+          status=$(herdr status --json)
+          version=$(printf '%s' "$status" | jq -r '.client.version // empty')
+          protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty')
+          [ "$version" = "0.7.4" ] || {
+            echo "::error::expected exact Herdr pin 0.7.4, got ${version:-<empty>}"
+            exit 1
+          }
+          case "$protocol" in
+            ''|*[!0-9]*) echo "::error::could not read client protocol"; exit 1 ;;
+          esac
+          [ "$protocol" -ge 16 ] || {
+            echo "::error::herdr protocol $protocol is below the required floor 16"
+            exit 1
+          }
+      - name: Start default Herdr session for fleet-state tripwire
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fm-herdr"
+          nohup herdr server >"$RUNNER_TEMP/fm-herdr/default-server.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/fm-herdr/default-server.pid"
+          attempt=0
+          while [ "$attempt" -lt 150 ]; do
+            running=$(herdr status --json 2>/dev/null | jq -r '.server.running // false' || echo false)
+            if [ "$running" = true ]; then
+              herdr session list --json | jq -e '
+                [.sessions[]? | select(.default == true and .name == "default" and .running == true)]
+                | length == 1
+              ' >/dev/null
+              echo "default Herdr session is running"
+              exit 0
+            fi
+            sleep 0.2
+            attempt=$((attempt + 1))
+          done
+          echo "::error::default Herdr server did not become ready"
+          cat "$RUNNER_TEMP/fm-herdr/default-server.log" || true
+          exit 1
+      - name: Snapshot pre-suite Herdr sessions
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fm-herdr"
+          bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
+      - name: Run real-Herdr family (serial, required)
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          bin/fm-test-run.sh --family real-herdr-gated \
+            --fail-on-gate-skip 'herdr not found'
+      - name: Cleanup job-owned Herdr lab sessions
+        if: always() && steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          bin/fm-herdr-ci-cleanup.sh teardown "$RUNNER_TEMP/fm-herdr/sessions-before.json" || {
+            echo "::warning::lab session cleanup reported a problem; see logs"
+            herdr session list --json || true
+            exit 1
+          }
 
   publish:
     name: Publish validated production branch
     needs: [mirror, validate]
     if: needs.validate.outputs.changed == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
+      - name: Require fork sync token
+        env:
+          FORK_SYNC_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$FORK_SYNC_TOKEN" ] || {
+            echo "::error::FORK_SYNC_TOKEN secret is required (contents+workflows write); refusing to publish"
+            exit 1
+          }
       - uses: actions/checkout@v6
         with:
           ref: ${{ env.PRODUCTION_BRANCH }}
           fetch-depth: 0
-      - name: Merge the validated upstream commit
+          token: ${{ secrets.FORK_SYNC_TOKEN }}
+      - name: Merge and publish the validated upstream commit
         env:
           UPSTREAM_SHA: ${{ needs.mirror.outputs.upstream_sha }}
+          VALIDATED_BASE_SHA: ${{ needs.validate.outputs.base_sha }}
         run: |
           set -euo pipefail
+          # Publish ONLY the exact production tree validate tested. If the branch
+          # moved during the validate window, or the mirror changed, abort rather
+          # than merge and push a tree the regression lanes never ran against.
+          test "$(git rev-parse HEAD)" = "$VALIDATED_BASE_SHA"
           git fetch origin main
           test "$(git rev-parse origin/main)" = "$UPSTREAM_SHA"
           git config user.name github-actions[bot]

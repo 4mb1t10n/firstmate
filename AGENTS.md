@@ -236,7 +236,8 @@ Load `diagnostic-reasoning` before scoping a reported bug and before acting on a
 
 Classify work as dispatchable when it does not overlap work under way, or queued and blocked when it touches the same project subsystem or depends on unlanded work.
 Dispatch independent work through the resource admission gate, serialize coarse overlaps, and record blockers durably.
-Three heavy crews are guaranteed, a fourth starts only when the configured headroom probe permits it, and further heavy work remains queued.
+The gate counts only heavy crews and only live ones, so three heavy crews are guaranteed, a fourth starts only when the configured headroom probe permits it, and further heavy work is durably queued and drained automatically by away-mode supervision when a slot frees.
+Scouts are read-only report work and default to the light class, so they never spend the heavy budget unless a caller pins `--resource-class` explicitly.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
