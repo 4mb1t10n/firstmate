@@ -232,6 +232,14 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Heavy-crew headroom probe (config/resource-admission-probe)
+
+Heavy crew launches pass through the resource admission gate, which counts only live heavy crews and guarantees three concurrent heavy slots unconditionally.
+The optional local, gitignored `config/resource-admission-probe` (under the effective config directory) is the operator's headroom check for the fourth slot: once three heavy crews already hold slots, `fm-spawn.sh` runs the probe and admits the fourth only when it is executable and exits 0.
+A nonzero exit, or an absent or non-executable probe, defers that heavy spawn to the durable queue under `state/resource-queue/` instead of starting it; it never blocks the guaranteed first three, and heavy work beyond the fourth slot is always queued regardless of the probe.
+Away-mode supervision drains the queue in enqueue order on the `FM_RESOURCE_DRAIN_SECS` cadence through `bin/fm-admit-queued.sh` as slots free.
+This section owns the probe's path, executable requirement, and admit/defer exit semantics; `bin/fm-resource-lib.sh` owns the exact slot-counting and liveness contract.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
