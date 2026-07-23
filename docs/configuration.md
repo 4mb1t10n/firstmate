@@ -445,6 +445,7 @@ FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a 
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks
 FM_HEARTBEAT_SCAN_SECS=300         # cadence of the catch-all status scan for missed captain verbs
 FM_HOUSEKEEPING_TICK=15            # seconds between batch-flush, stale/pause-recheck, and scan passes
+FM_RESOURCE_DRAIN_SECS=30          # cadence for the housekeeping resource-queue drain that admits capacity-deferred heavy spawns (bin/fm-admit-queued.sh) when a slot frees
 FM_CRASH_THRESHOLD=10              # watcher crashes allowed inside FM_CRASH_WINDOW before daemon backoff
 FM_CRASH_WINDOW=60                 # seconds in the crash-loop detection window
 FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash threshold

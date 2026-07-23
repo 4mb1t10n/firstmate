@@ -81,7 +81,7 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   --resource-class defaults to heavy.
+#   --resource-class defaults to heavy, except scouts, which default to light.
 #   Resource admission guarantees three concurrent heavy crews, allows a fourth
 #   only when config/resource-admission-probe succeeds, and durably queues later
 #   heavy requests under state/resource-queue/.
