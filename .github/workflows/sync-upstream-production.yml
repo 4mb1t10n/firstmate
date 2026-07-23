@@ -1,0 +1,156 @@
+name: Sync upstream into production
+
+on:
+  schedule:
+    - cron: "17 07 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream-production
+  cancel-in-progress: false
+
+env:
+  PRODUCTION_BRANCH: fm/firstmate-resilience-64g
+
+jobs:
+  mirror:
+    name: Fast-forward fork main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      upstream_sha: ${{ steps.mirror.outputs.upstream_sha }}
+    steps:
+      - name: Sync clean main mirror
+        id: mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh repo sync "$GITHUB_REPOSITORY" --branch main
+          upstream_sha=$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
+          printf 'upstream_sha=%s\n' "$upstream_sha" >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Validate upstream integration
+    needs: mirror
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.PRODUCTION_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Merge mirrored upstream without publishing
+        id: merge
+        env:
+          UPSTREAM_SHA: ${{ needs.mirror.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$UPSTREAM_SHA"
+          if git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD; then
+            printf 'changed=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git merge --no-edit "$UPSTREAM_SHA"
+          printf 'changed=true\n' >> "$GITHUB_OUTPUT"
+      - name: Install pinned ShellCheck
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install test dependency
+        if: steps.merge.outputs.changed == 'true'
+        run: npm install -g tasks-axi
+      - name: Lint
+        if: steps.merge.outputs.changed == 'true'
+        run: bin/fm-lint.sh
+      - name: Check regression partition
+        if: steps.merge.outputs.changed == 'true'
+        run: bin/fm-test-run.sh --check-coverage
+      - name: Run portable regression lanes
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          bin/fm-test-run.sh --lane portable-parallel-1
+          bin/fm-test-run.sh --lane portable-parallel-2
+          bin/fm-test-run.sh --lane portable-serial
+
+  publish:
+    name: Publish validated production branch
+    needs: [mirror, validate]
+    if: needs.validate.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.PRODUCTION_BRANCH }}
+          fetch-depth: 0
+      - name: Merge the validated upstream commit
+        env:
+          UPSTREAM_SHA: ${{ needs.mirror.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$UPSTREAM_SHA"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git merge --no-edit "$UPSTREAM_SHA"
+          git push origin "HEAD:$PRODUCTION_BRANCH"
+
+  report-failure:
+    name: Report failed integration
+    needs: [mirror, validate, publish]
+    if: always() && contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update maintenance issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "[upstream-sync] Production branch needs attention"
+          RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: |
+          set -euo pipefail
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          body="Upstream synchronization failed. Inspect the workflow run: $RUN_URL"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$body"
+          fi
+
+  resolve-failure:
+    name: Resolve prior integration incident
+    needs: [mirror, validate, publish]
+    if: always() && !contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Close the open maintenance issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "[upstream-sync] Production branch needs attention"
+        run: |
+          set -euo pipefail
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue close "$number" --repo "$GITHUB_REPOSITORY" \
+              --comment "The latest upstream synchronization completed successfully."
+          fi
