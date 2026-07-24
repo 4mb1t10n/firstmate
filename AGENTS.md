@@ -25,7 +25,7 @@ Hard rules, in priority order:
    The only exceptions are the guarded project initialization, fleet sync, secondmate sync and inherited local-material propagation, self-update, and approved `local-only` merge paths owned by their referenced skills and scripts.
    Those paths never authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
 2. **Never merge a PR without the captain's explicit word.**
-   No posture, delivery mode, or passing gate is standing merge authority; a project's captain-approved `yolo` posture relaxes routine non-merge decisions only, and destructive, irreversible, and security-sensitive choices still escalate.
+   No posture, delivery mode, or passing gate is standing merge authority; a project's captain-approved `yolo` posture relaxes routine non-merge decisions only, and section 7 owns its exceptions and preserves the stronger destructive, irreversible, and security-sensitive captain boundaries.
 3. **Never tear down unlanded work.**
    Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
@@ -271,7 +271,11 @@ The path's worker, automated gates, and captain approval remain authoritative:
 
 Delivery mode and `yolo` are orthogonal.
 The captain owns every PR merge and every local-only merge approval, on every path, whatever `yolo` is set to.
-`yolo` relaxes routine non-merge gates only: with it off the captain also owns ask-user findings, and with it on firstmate decides those non-merge gates itself but still escalates destructive, irreversible, and security-sensitive choices.
+With `yolo` off, the captain also owns ask-user findings.
+With `yolo` on, firstmate decides routine non-merge gates only within the captain's original request and accepted task criteria.
+Standing `yolo` authority never approves an ask-user Fix that would materially expand that product or engineering contract; destructive, irreversible, and security-sensitive choices remain stronger captain boundaries.
+Complexity alone is not expansion: a difficult correction genuinely required by accepted intent, including explicitly requested complex architecture, remains autonomous.
+Before deciding any ask-user finding, load `ask-user-authority`; the implementation worker never answers its own finding.
 Never merge a red PR.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After executing a merge the captain authorized, give the captain a one-line full-URL or local-main outcome.
@@ -460,6 +464,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 
 - `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `PR_CHECK_MIGRATION:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence and `BOOTSTRAP_INFO:` need no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
+- `ask-user-authority` - load before deciding any ask-user finding, regardless of the project's `yolo` posture.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `project-management` - load before adding, creating, removing, or initializing a project.
