@@ -759,6 +759,18 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # Host-side reconciliation requests are already queued durably by
+  # fm-reconcile.sh. The pending marker is an acknowledgement latch: leave it
+  # in place until fm-reconcile-ack.sh confirms that First Mate accepted the
+  # inventory. A re-armed watcher therefore re-surfaces an unacknowledged tick
+  # instead of silently returning to event-only supervision.
+  if [ -s "$STATE/reconcile/pending" ]; then
+    reconcile_reason=$(head -1 "$STATE/reconcile/pending" 2>/dev/null || true)
+    case "$reconcile_reason" in
+      reconcile:*) wake "$reconcile_reason" ;;
+    esac
+  fi
+
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.

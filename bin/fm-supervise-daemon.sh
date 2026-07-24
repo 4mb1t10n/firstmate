@@ -417,6 +417,13 @@ classify_heartbeat() {
   printf 'self|heartbeat (catch-all scan runs in housekeeping)'
 }
 
+classify_reconcile() {  # <full reason>
+  # Reconciliation is an explicit control-plane request with an acknowledgement
+  # token. It must reach First Mate even when ordinary heartbeat and working
+  # status noise is self-handled during away mode.
+  printf 'escalate|%s' "$1"
+}
+
 # Anything unrecognized is escalated (fail-safe).
 classify_unknown() {  # <reason>
   printf 'escalate|unknown wake: %s' "$1"
@@ -1194,7 +1201,7 @@ should_force_self() {  # <reason>
 is_wake_reason() {  # <reason>
   local reason=$1
   case "$reason" in
-    signal:*|stale:*|check:*|heartbeat|heartbeat:*) return 0 ;;
+    signal:*|stale:*|check:*|heartbeat|heartbeat:*|reconcile:*) return 0 ;;
   esac
   return 1
 }
@@ -1215,6 +1222,7 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_stale "$arg" "$state") ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
+    reconcile:*) decision=$(classify_reconcile "$reason") ;;
     *)        decision=$(classify_unknown "$reason") ;;
   esac
   action=${decision%%|*}

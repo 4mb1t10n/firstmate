@@ -275,7 +275,25 @@ else
   printf '(silent - all good)\n'
 fi
 
-# --- 3. wake-drain -------------------------------------------------------
+# --- 3. reconciliation heartbeat -------------------------------------------
+# A locked primary session forces one fresh GitHub reconciliation before the
+# wake queue is drained. The tick is non-fatal so an unavailable forge becomes
+# visible in its own output without suppressing the rest of recovery.
+subsection "RECONCILIATION"
+if [ "$READ_ONLY" -eq 1 ]; then
+  printf 'skipped (read-only session)\n'
+elif [ "${FM_RECONCILE_SESSION_START:-1}" = 0 ]; then
+  printf 'skipped (FM_RECONCILE_SESSION_START=0)\n'
+else
+  RECONCILE_OUT=$("$SCRIPT_DIR/fm-reconcile.sh" --tick --force 2>&1)
+  RECONCILE_RC=$?
+  printf '%s\n' "$RECONCILE_OUT"
+  if [ "$RECONCILE_RC" -ne 0 ]; then
+    printf 'RECONCILIATION_ERROR: tick exited %s; continue recovery and repair GitHub inventory before dispatch.\n' "$RECONCILE_RC"
+  fi
+fi
+
+# --- 4. wake-drain -------------------------------------------------------
 # Drained records are this turn's first work queue (AGENTS.md section 8); the
 # drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest

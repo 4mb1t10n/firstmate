@@ -240,6 +240,14 @@ A nonzero exit, or an absent or non-executable probe, defers that heavy spawn to
 Away-mode supervision drains the queue in enqueue order on the `FM_RESOURCE_DRAIN_SECS` cadence through `bin/fm-admit-queued.sh` as slots free.
 This section owns the probe's path, executable requirement, and admit/defer exit semantics; `bin/fm-resource-lib.sh` owns the exact slot-counting and liveness contract.
 
+## Reconciliation heartbeat
+
+The reconciliation heartbeat inventories every open issue and pull request in the configured project registry, reconstructs issue ownership, detects orphaned `in-progress` leases, inventories heavyweight child processes, and emits a durable wake when First Mate has work to advance.
+It runs immediately at locked session start and may be called frequently by the host supervisor because not-due ticks are local-only.
+The default cadence is 10 minutes while crews, pull requests, or leased issues are active, 30 minutes while open work is idle, and 2 hours only when no issue remains open.
+First Mate acknowledges each actionable cycle with `bin/fm-reconcile-ack.sh <token>` after performing the reconciliation procedure in [`reconciliation-heartbeat.md`](reconciliation-heartbeat.md).
+An acknowledgement that exceeds the grace interval changes reconciliation health to `control-plane-failed`, keeping partial control-plane failure visible until the exact outstanding token is acknowledged.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -389,6 +397,13 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_RECONCILE_ACTIVE_INTERVAL=600   # reconciliation cadence while active crews, PRs, or issue leases exist
+FM_RECONCILE_OPEN_IDLE_INTERVAL=1800   # reconciliation cadence while open issues exist without active work
+FM_RECONCILE_COMPLETE_INTERVAL=7200   # reconciliation cadence only when every configured repository has zero open issues
+FM_RECONCILE_ACK_GRACE=900   # seconds before an unacknowledged actionable cycle becomes a control-plane failure
+FM_RECONCILE_GH_TIMEOUT=30   # seconds allowed per bounded GitHub inventory request
+FM_RECONCILE_ISSUE_LIMIT=1000   # maximum open issues inventoried per configured repository
+FM_RECONCILE_PR_LIMIT=500   # maximum open pull requests inventoried per configured repository
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
