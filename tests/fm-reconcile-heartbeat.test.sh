@@ -187,6 +187,90 @@ jq -e '.ack.required == true and .ack.token != null' "$OUT_B" >/dev/null \
   || fail "active work with zero open issues did not latch a reconciliation wake"
 pass "a crew, PR, validation run, or lease keeps the 10-minute cadence after the last issue closes"
 
+# --- the 2-hour cadence is reserved for a genuinely finished fleet ----------
+# The zero-open case above still holds an open PR, so it proves only that active
+# work pins the fast cadence. The slow cadence needs its own fleet with nothing
+# open and nothing active, or "every 2 hours only when no issues remain" would
+# be the untested half of the same branch.
+HOME_E="$TMP/home-e"
+FAKEBIN_E="$TMP/bin-e"
+mkdir -p "$HOME_E/state" "$HOME_E/data" "$HOME_E/projects/app" "$FAKEBIN_E"
+cat > "$HOME_E/data/projects.md" <<'EOF'
+- app [no-mistakes +yolo] - Test application (added 2026-07-24)
+EOF
+git -C "$HOME_E/projects/app" init -q
+git -C "$HOME_E/projects/app" remote add origin https://github.com/acme/app.git
+cat > "$FAKEBIN_E/gh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+case "$1 $2" in
+  "issue list") printf '[]\n' ;;
+  "pr list") printf '[]\n' ;;
+  *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$FAKEBIN_E/gh"
+
+OUT_E="$TMP/out-e.json"
+PATH="$FAKEBIN_E:$PATH" \
+  FM_HOME="$HOME_E" \
+  FM_RECONCILE_NOW="2026-07-24T12:00:00Z" \
+  FM_RECONCILE_NOW_EPOCH=1784894400 \
+  FM_PROCESS_OLD_SECS=999999999 \
+  "$ROOT/bin/fm-reconcile.sh" --tick --json > "$OUT_E"
+jq -e '.counts.open == 0 and .counts.open_prs == 0 and .counts.active_crews == 0
+  and .counts.active_leases == 0 and .counts.validations == 0' "$OUT_E" >/dev/null \
+  || fail "the finished fleet was not inventoried as empty"
+jq -e '.next_interval_seconds == 7200' "$OUT_E" >/dev/null \
+  || fail "a fleet with no open or active work did not select the 2-hour cadence"
+jq -e '.health.state == "idle-complete"' "$OUT_E" >/dev/null \
+  || fail "a fleet with no open or active work was not reported idle-complete"
+jq -e '.ack.required == false and .ack.token == null' "$OUT_E" >/dev/null \
+  || fail "a finished fleet demanded an acknowledgement with nothing to acknowledge"
+[ ! -e "$HOME_E/state/reconcile/pending" ] \
+  || fail "a finished fleet latched a reconciliation wake"
+jq -e '.next_due_epoch == 1784901600' "$OUT_E" >/dev/null \
+  || fail "the 2-hour cadence did not schedule the next tick 7200s out"
+
+# The scheduler must actually hold that cadence: a tick arriving inside the
+# window is local-only, so the supervisor may poll it often. A gh that records
+# every call proves the quiet fleet costs no GitHub request until 7200s elapse.
+GH_CALLS="$TMP/gh-calls-e.log"
+: > "$GH_CALLS"
+cat > "$FAKEBIN_E/gh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$FM_TEST_GH_CALLS"
+case "$1 $2" in
+  "issue list") printf '[]\n' ;;
+  "pr list") printf '[]\n' ;;
+  *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$FAKEBIN_E/gh"
+
+tick_e() {  # <epoch> <out>
+  PATH="$FAKEBIN_E:$PATH" \
+    FM_HOME="$HOME_E" \
+    FM_TEST_GH_CALLS="$GH_CALLS" \
+    FM_RECONCILE_NOW_EPOCH="$1" \
+    FM_PROCESS_OLD_SECS=999999999 \
+    "$ROOT/bin/fm-reconcile.sh" --tick --json > "$2"
+}
+
+tick_e 1784901599 "$TMP/out-e2.json"
+jq -e '.tick == "not-due"' "$TMP/out-e2.json" >/dev/null \
+  || fail "a tick one second inside the 2-hour window was treated as due"
+[ ! -s "$GH_CALLS" ] \
+  || fail "a not-due tick still reached GitHub ($(cat "$GH_CALLS"))"
+
+tick_e 1784901600 "$TMP/out-e3.json"
+jq -e '.tick == "executed"' "$TMP/out-e3.json" >/dev/null \
+  || fail "the tick due exactly 7200s later did not run"
+grep -F 'issue list' "$GH_CALLS" >/dev/null \
+  || fail "the due tick did not re-inventory open issues"
+pass "an empty fleet with no open or active work falls back to the 2-hour cadence"
+
 # --- durable leases are cross-checked against live task ids ----------------
 HOME_C="$TMP/home-c"
 FAKEBIN_C="$TMP/bin-c"

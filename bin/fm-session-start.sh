@@ -31,16 +31,24 @@
 #                       MUTATING sweeps (legacy PR-check migration, secondmate
 #                       fast-forward, secondmate liveness, X-mode artifact writes, fleet sync) run only
 #                       when this session actually holds the lock.
-#   3. wake-drain     - mutates the durable wake queue, so it also only runs
+#   3. reconciliation - one forced bin/fm-reconcile.sh --tick under a whole-tick
+#                       timeout, so its actionable wake is already queued when
+#                       the drain below runs. It writes durable reconciliation
+#                       state, so it only runs when locked; a non-locked or
+#                       FM_RECONCILE_SESSION_START=0 session skips it. A failed
+#                       or timed-out tick prints RECONCILIATION_ERROR and never
+#                       aborts the rest of the digest.
+#                       docs/reconciliation-heartbeat.md owns the loop.
+#   4. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
-#   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   5. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
-#   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
-#   6. closing reminder - prints the context-specific watcher next step; this
+#   7. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
@@ -356,7 +364,7 @@ fi
   --afk "$AFK_PRESENT" \
   --x-mode "$X_MODE_PRESENT"
 
-# --- 4. context digest -----------------------------------------------------
+# --- 5. context digest -----------------------------------------------------
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
@@ -364,7 +372,7 @@ print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
-# --- 5. fleet-state digest ---------------------------------------------
+# --- 6. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
@@ -418,7 +426,7 @@ else
   printf 'absent\n'
 fi
 
-# --- 6. closing reminder -----------------------------------------------
+# --- 7. closing reminder -----------------------------------------------
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
   cat <<'EOF'

@@ -2,6 +2,8 @@
 name: reconciliation-heartbeat
 description: Agent-only procedure for handling a reconcile wake, maintaining GitHub issue leases, advancing every authorized issue, cleaning completed crews, and applying the strict automatic merge gate.
 user-invocable: false
+metadata:
+  internal: true
 ---
 
 # Reconciliation heartbeat

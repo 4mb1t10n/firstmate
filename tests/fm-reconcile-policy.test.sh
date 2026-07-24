@@ -53,6 +53,20 @@ jq -e '.repo == "acme/app" and .number == 7 and .task == "task-7"' \
   "$STATE/reconcile/leases/acme_app-7.json" >/dev/null \
   || fail "reserve did not persist the lease"
 
+# The lease is renewable by its own owner: re-reserving returns the existing
+# lease unchanged and re-labels nothing, so a crew that reconciles repeatedly
+# cannot churn the issue or lose its original reservation time.
+RESERVED_AT=$(jq -r '.reserved_at' "$STATE/reconcile/leases/acme_app-7.json")
+ADD_LABEL_CALLS=$(grep -c -- '--add-label in-progress' "$GH_LOG")
+PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_TEST_GH_LOG="$GH_LOG" \
+  "$ROOT/bin/fm-issue-lease.sh" reserve acme/app#7 task-7 app >/dev/null \
+  || fail "the owning task could not renew its own lease"
+jq -e --arg at "$RESERVED_AT" '.task == "task-7" and .reserved_at == $at' \
+  "$STATE/reconcile/leases/acme_app-7.json" >/dev/null \
+  || fail "renewing a lease rewrote the original reservation"
+[ "$(grep -c -- '--add-label in-progress' "$GH_LOG")" -eq "$ADD_LABEL_CALLS" ] \
+  || fail "renewing an existing lease re-applied the remote in-progress label"
+
 if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_TEST_GH_LOG="$GH_LOG" \
     "$ROOT/bin/fm-issue-lease.sh" reserve acme/app#7 other-task app >/dev/null 2>&1; then
   fail "duplicate task acquired an existing issue lease"
@@ -70,7 +84,10 @@ HEAD_SHA=abcdef1234567890
 FM_HOME="$HOME_DIR" "$ROOT/bin/fm-validation-record.sh" task-7 "$HEAD_SHA" run-1 >/dev/null
 
 HEAD_AT=2026-07-24T10:00:00Z
-cat > "$PR_VIEW" <<EOF
+# A fully gated PR, rewritten before each case so every refusal below has
+# exactly one cause and a passing case can never be a leftover mutation.
+write_pr_view() {
+  cat > "$PR_VIEW" <<EOF
 {
   "number": 8,
   "url": "https://github.com/acme/app/pull/8",
@@ -93,6 +110,8 @@ cat > "$PR_VIEW" <<EOF
   "comments": []
 }
 EOF
+}
+write_pr_view
 
 # Rewrite only the review evidence, so every Greptile case runs against an
 # otherwise fully gated PR and the refusal can have no other cause.
@@ -148,6 +167,46 @@ jq '.statusCheckRollup += [{"name":"Cypress E2E","status":"COMPLETED","conclusio
 mv "$PR_VIEW.tmp" "$PR_VIEW"
 if try_merge; then
   fail "failed Cypress was allowed to auto-merge"
+fi
+
+# Each remaining required gate is refused on its own. Cypress and Greptile were
+# covered above; Migration Drift, conflict-freedom, and exact-head No Mistakes
+# evidence are equally mandatory, so each one is removed from an otherwise
+# mergeable PR and must refuse by itself.
+mutate_pr_view() {  # <jq-program>
+  write_pr_view
+  jq "$1" "$PR_VIEW" > "$PR_VIEW.tmp"
+  mv "$PR_VIEW.tmp" "$PR_VIEW"
+}
+
+write_pr_view
+try_merge || fail "the restored baseline PR was not mergeable"
+
+mutate_pr_view 'del(.statusCheckRollup[] | select(.name == "Migration Drift / stg"))'
+if try_merge; then fail "PR without Migration Drift was allowed to auto-merge"; fi
+[ ! -s "$GH_AXI_LOG" ] || fail "missing Migration Drift still invoked merge"
+
+mutate_pr_view '.statusCheckRollup |= map(
+  if .name == "Migration Drift / stg" then .conclusion = "FAILURE" else . end)'
+if try_merge; then fail "failing Migration Drift was allowed to auto-merge"; fi
+
+mutate_pr_view '.mergeable = "CONFLICTING"'
+if try_merge; then fail "a conflicted PR was allowed to auto-merge"; fi
+[ ! -s "$GH_AXI_LOG" ] || fail "a conflicted PR still invoked merge"
+
+# The recorded evidence names one exact commit, so a PR that gained a commit
+# after validation has no complete No Mistakes run for what would be merged.
+mutate_pr_view '.headRefOid = "999999999999cafe"
+  | .commits += [{"oid":"999999999999cafe","committedDate":"2026-07-24T13:00:00Z"}]'
+if try_merge; then fail "a head commit with no No Mistakes evidence was auto-merged"; fi
+[ ! -s "$GH_AXI_LOG" ] || fail "stale No Mistakes evidence still invoked merge"
+
+write_pr_view
+if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
+    FM_TEST_GH_LOG="$GH_LOG" FM_TEST_GH_AXI_LOG="$GH_AXI_LOG" FM_TEST_PR_VIEW="$PR_VIEW" \
+    "$ROOT/bin/fm-pr-auto-merge.sh" task-unvalidated https://github.com/acme/app/pull/8 \
+    >/dev/null 2>&1; then
+  fail "a task with no No Mistakes evidence at all was auto-merged"
 fi
 
 pass "automatic merge requires exact No Mistakes evidence and every mandatory green gate"

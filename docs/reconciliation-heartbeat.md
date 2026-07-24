@@ -110,6 +110,10 @@ The captain pane, the reconciliation's own ancestry, and the supervision plane a
 
 Only a process proven to belong to nobody is `unowned`, and only an old `unowned` process is offered as a cleanup candidate.
 
+Age comes from the portable `ps` read, which reports elapsed seconds on Linux only.
+
+On macOS every process therefore reads as age 0 and never becomes a cleanup candidate: ownership and class stay visible, but `degraded-cleanup` is a Linux-host state.
+
 ## Host integration
 
 Run the scheduler outside First Mate's workload cgroup.
