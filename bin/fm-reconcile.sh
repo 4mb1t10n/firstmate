@@ -85,7 +85,7 @@ render() {
       "health: \(.health.state)",
       "counts: open=\(.counts.open) available=\(.counts.available) in_progress=\(.counts.in_progress) orphaned=\(.counts.orphaned) prs=\(.counts.open_prs) active_crews=\(.counts.active_crews)",
       "next_interval_seconds: \(.next_interval_seconds)",
-      "ack_token: \(.ack.token // \"none\")"
+      "ack_token: \(.ack.token // "none")"
     '
   fi
 }
@@ -213,6 +213,8 @@ for meta in "$STATE"/*.meta; do
     '. + [{id:$id,project:$project,issue_repo:$repo,issue_number:$number}]')
 done
 
+live_task_ids=$(printf '%s' "$tasks" | jq -r '.[].id' | tr '\n' ' ')
+
 leases='[]'
 for lease in "$RECONCILE_DIR"/leases/*.json; do
   [ -f "$lease" ] || continue
@@ -230,12 +232,23 @@ for lease in "$RECONCILE_DIR"/leases/*.json; do
   fi
 done
 
+# A lease file is a claim, not proof of an owner: cross-check every lease against
+# the live task ids so a lease whose crew died is reported as an orphan to repair
+# instead of silently vouching for the remote in-progress label.
+leases=$(printf '%s' "$leases" | jq --argjson tasks "$tasks" '
+  ($tasks | map(.id)) as $live
+  | map(
+      ((.task as $task | $live | index($task)) != null) as $owner_live
+      | . + {owner_live:$owner_live, orphaned:($owner_live | not)}
+    )
+')
+
 issues=$(printf '%s' "$issues" | jq --argjson tasks "$tasks" --argjson leases "$leases" --argjson prs "$prs" '
   map(
     . as $issue
     | (
         ($tasks | map(select(.issue_repo == $issue.repo and (.issue_number | tostring) == ($issue.number | tostring))))
-        + ($leases | map(select(.repo == $issue.repo and (.number | tostring) == ($issue.number | tostring))))
+        + ($leases | map(select(.owner_live and .repo == $issue.repo and (.number | tostring) == ($issue.number | tostring))))
       ) as $owners
     | ($prs | map(select(any(.closingIssuesReferences[]?; (.number | tostring) == ($issue.number | tostring))))) as $linked_prs
     | . + {
@@ -253,6 +266,18 @@ orphaned_count=$(printf '%s' "$issues" | jq '[.[] | select(.orphaned)] | length'
 pr_count=$(printf '%s' "$prs" | jq 'length')
 active_count=$(printf '%s' "$tasks" | jq 'length')
 error_count=$(printf '%s' "$errors" | jq 'length')
+lease_count=$(printf '%s' "$leases" | jq 'length')
+active_lease_count=$(printf '%s' "$leases" | jq '[.[] | select(.owner_live)] | length')
+orphaned_lease_count=$((lease_count - active_lease_count))
+# A validation record is live work only while its task still exists: the record
+# itself is never cleaned, so counting bare records would pin the fast cadence.
+validation_count=0
+for validation in "$STATE"/reconcile/validation/*.json; do
+  [ -f "$validation" ] || continue
+  case " $live_task_ids " in
+    *" $(basename "$validation" .json) "*) validation_count=$((validation_count + 1)) ;;
+  esac
+done
 if processes=$("$SCRIPT_DIR/fm-process-inventory.sh" 2>/dev/null); then
   old_unowned_count=$(printf '%s' "$processes" | jq '.counts.old_unowned')
 else
@@ -262,22 +287,31 @@ else
   error_count=$((error_count + 1))
 fi
 
+# Active work, not the open issue count, selects the fast cadence and demands an
+# acknowledgement: a crew, an open PR, a validation run, or an issue lease still
+# needs supervision after the last issue closes.
+active_work=0
+if [ "$active_count" -gt 0 ] || [ "$pr_count" -gt 0 ] || [ "$in_progress_count" -gt 0 ] \
+    || [ "$lease_count" -gt 0 ] || [ "$validation_count" -gt 0 ]; then
+  active_work=1
+fi
+
 if [ "$error_count" -gt 0 ]; then
   health=degraded-sync
 elif [ "$old_unowned_count" -gt 0 ]; then
   health=degraded-cleanup
-elif [ "$open_count" -eq 0 ]; then
+elif [ "$open_count" -eq 0 ] && [ "$active_work" -eq 0 ]; then
   health=idle-complete
 else
   health=action-required
 fi
 
-if [ "$open_count" -eq 0 ]; then
-  interval=$COMPLETE_INTERVAL
-elif [ "$active_count" -gt 0 ] || [ "$pr_count" -gt 0 ] || [ "$in_progress_count" -gt 0 ]; then
+if [ "$active_work" -eq 1 ]; then
   interval=$ACTIVE_INTERVAL
-else
+elif [ "$open_count" -gt 0 ]; then
   interval=$OPEN_IDLE_INTERVAL
+else
+  interval=$COMPLETE_INTERVAL
 fi
 next_due=$((NOW_EPOCH + interval))
 
@@ -303,7 +337,7 @@ ack_json='{"required":false,"token":null,"previous_unacked":false}'
 token=
 new_token=false
 if [ "$open_count" -gt 0 ] || [ "$error_count" -gt 0 ] || [ "$old_unowned_count" -gt 0 ] \
-    || [ -n "$outstanding_token" ]; then
+    || [ "$active_work" -eq 1 ] || [ -n "$outstanding_token" ]; then
   if [ -n "$outstanding_token" ]; then
     token=$outstanding_token
   elif [ "$MODE" = tick ]; then
@@ -343,6 +377,9 @@ snapshot=$(jq -n \
   --argjson orphaned "$orphaned_count" \
   --argjson open_prs "$pr_count" \
   --argjson active_crews "$active_count" \
+  --argjson active_leases "$active_lease_count" \
+  --argjson orphaned_leases "$orphaned_lease_count" \
+  --argjson validations "$validation_count" \
   '{
     schema:"fm-reconcile.v1",
     tick:"executed",
@@ -357,7 +394,10 @@ snapshot=$(jq -n \
       in_progress:$in_progress,
       orphaned:$orphaned,
       open_prs:$open_prs,
-      active_crews:$active_crews
+      active_crews:$active_crews,
+      active_leases:$active_leases,
+      orphaned_leases:$orphaned_leases,
+      validations:$validations
     },
     repositories:$repos,
     issues:$issues,

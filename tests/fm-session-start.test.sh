@@ -309,6 +309,13 @@ EOF
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
 
+  # The session-start tick runs without --json, so this digest is where the
+  # reconciliation renderer is actually shown to the operator.
+  assert_contains "$out" "RECONCILIATION" "digest did not label the reconciliation section"
+  assert_contains "$out" "ack_token: " "reconciliation section did not render the acknowledgement token line"
+  assert_not_contains "$out" "jq: error" "reconciliation section printed a jq compile error"
+  assert_not_contains "$out" "RECONCILIATION_ERROR" "a successful reconciliation tick was reported as a forge failure"
+
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
   assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \
     "digest did not label the shared captain section"

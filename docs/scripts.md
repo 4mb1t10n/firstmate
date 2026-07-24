@@ -63,7 +63,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-reconcile.sh`        | Inventory every configured repository and issue, persist adaptive heartbeat state, and wake First Mate for actionable work |
 | `fm-reconcile-ack.sh`    | Record First Mate's exact acknowledgement of the latest reconciliation cycle          |
 | `fm-issue-lease.sh`      | Reserve or release an issue through the exact `in-progress` label and durable local ownership evidence |
-| `fm-process-inventory.sh` | Report heavyweight child processes, inferred task ownership, and old unowned cleanup candidates |
+| `fm-process-inventory.sh` | Report heavyweight child processes, parent-chain task ownership, and old unowned cleanup candidates; ambiguous, captain, and supervision processes are never candidates |
 | `fm-validation-record.sh` | Bind completed No Mistakes evidence to one task and exact PR head                    |
 | `fm-pr-auto-merge.sh`    | Enforce the complete feature-to-stg automatic merge policy before invoking GitHub merge |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |

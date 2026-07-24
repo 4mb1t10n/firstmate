@@ -98,7 +98,7 @@ The gate refuses unless:
 - The PR targets `stg`.
 - The PR is conflict-free.
 - Exact-head No Mistakes evidence exists.
-- Greptile evidence is present and exactly 5/5.
+- The latest Greptile review posted after the current head commit carries a score field reading exactly 5/5.
 - Migration Drift is present and passing.
 - Cypress is present and passing.
 - Every reported CI check is green.

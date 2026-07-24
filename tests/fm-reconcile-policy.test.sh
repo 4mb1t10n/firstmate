@@ -69,6 +69,7 @@ pass "in-progress is an exclusive durable issue lease"
 HEAD_SHA=abcdef1234567890
 FM_HOME="$HOME_DIR" "$ROOT/bin/fm-validation-record.sh" task-7 "$HEAD_SHA" run-1 >/dev/null
 
+HEAD_AT=2026-07-24T10:00:00Z
 cat > "$PR_VIEW" <<EOF
 {
   "number": 8,
@@ -77,30 +78,67 @@ cat > "$PR_VIEW" <<EOF
   "baseRefName": "stg",
   "headRefOid": "$HEAD_SHA",
   "mergeable": "MERGEABLE",
+  "commits": [
+    {"oid":"0000000000000000","committedDate":"2026-07-23T09:00:00Z"},
+    {"oid":"$HEAD_SHA","committedDate":"$HEAD_AT"}
+  ],
   "statusCheckRollup": [
     {"name":"Migration Drift / stg","status":"COMPLETED","conclusion":"SUCCESS"},
     {"name":"Cypress E2E","status":"COMPLETED","conclusion":"SUCCESS"},
     {"name":"Typecheck","status":"COMPLETED","conclusion":"SUCCESS"}
   ],
   "reviews": [
-    {"author":{"login":"greptile-apps"},"body":"Quality score: 5/5"}
+    {"author":{"login":"greptile-apps"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"}
   ],
   "comments": []
 }
 EOF
 
-PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
-  FM_TEST_GH_LOG="$GH_LOG" FM_TEST_GH_AXI_LOG="$GH_AXI_LOG" FM_TEST_PR_VIEW="$PR_VIEW" \
-  "$ROOT/bin/fm-pr-auto-merge.sh" task-7 https://github.com/acme/app/pull/8
+# Rewrite only the review evidence, so every Greptile case runs against an
+# otherwise fully gated PR and the refusal can have no other cause.
+set_reviews() {
+  jq --argjson reviews "$1" '.reviews = $reviews | .comments = []' "$PR_VIEW" > "$PR_VIEW.tmp"
+  mv "$PR_VIEW.tmp" "$PR_VIEW"
+}
+
+try_merge() {
+  : > "$GH_AXI_LOG"
+  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
+    FM_TEST_GH_LOG="$GH_LOG" FM_TEST_GH_AXI_LOG="$GH_AXI_LOG" FM_TEST_PR_VIEW="$PR_VIEW" \
+    "$ROOT/bin/fm-pr-auto-merge.sh" task-7 https://github.com/acme/app/pull/8 >/dev/null 2>&1
+}
+
+try_merge || fail "fully gated PR was not merged"
 grep -F 'pr merge 8 --repo acme/app --squash --delete-branch' "$GH_AXI_LOG" >/dev/null \
   || fail "fully gated PR was not merged"
 
+set_reviews '[{"author":{"login":"greptile-apps"},"submittedAt":"2026-07-23T09:30:00Z","body":"Quality score: 5/5"}]'
+if try_merge; then fail "a 5/5 predating the current head authorized the merge"; fi
+[ ! -s "$GH_AXI_LOG" ] || fail "stale Greptile evidence still invoked merge"
+
+set_reviews '[{"author":{"login":"helpful-bot"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"}]'
+if try_merge; then fail "a Greptile lookalike author authorized the merge"; fi
+
+set_reviews '[{"author":{"login":"greptile-apps"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 4/5"}]'
+if try_merge; then fail "a 4/5 Greptile score authorized the merge"; fi
+
+set_reviews '[
+  {"author":{"login":"greptile-apps"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"},
+  {"author":{"login":"greptile-apps"},"submittedAt":"2026-07-24T12:00:00Z","body":"Quality score: 3/5"}
+]'
+if try_merge; then fail "a superseded 5/5 authorized the merge"; fi
+
+set_reviews '[{"author":{"login":"greptile-apps"},"submittedAt":"2026-07-24T11:00:00Z","body":"Reads like a 5/5 change to me, but I cannot score it."}]'
+if try_merge; then fail "incidental 5/5 prose authorized the merge without a score field"; fi
+
+set_reviews '[{"author":{"login":"greptile-apps"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"}]'
+try_merge || fail "restored current 5/5 evidence did not merge"
+
+pass "automatic merge requires the latest Greptile score field, posted after the head commit, to be exactly 5/5"
+
 jq 'del(.statusCheckRollup[] | select(.name == "Cypress E2E"))' "$PR_VIEW" > "$PR_VIEW.tmp"
 mv "$PR_VIEW.tmp" "$PR_VIEW"
-: > "$GH_AXI_LOG"
-if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
-    FM_TEST_GH_LOG="$GH_LOG" FM_TEST_GH_AXI_LOG="$GH_AXI_LOG" FM_TEST_PR_VIEW="$PR_VIEW" \
-    "$ROOT/bin/fm-pr-auto-merge.sh" task-7 https://github.com/acme/app/pull/8 >/dev/null 2>&1; then
+if try_merge; then
   fail "PR without Cypress was allowed to auto-merge"
 fi
 [ ! -s "$GH_AXI_LOG" ] || fail "missing Cypress still invoked merge"
@@ -108,9 +146,7 @@ fi
 jq '.statusCheckRollup += [{"name":"Cypress E2E","status":"COMPLETED","conclusion":"FAILURE"}]' \
   "$PR_VIEW" > "$PR_VIEW.tmp"
 mv "$PR_VIEW.tmp" "$PR_VIEW"
-if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
-    FM_TEST_GH_LOG="$GH_LOG" FM_TEST_GH_AXI_LOG="$GH_AXI_LOG" FM_TEST_PR_VIEW="$PR_VIEW" \
-    "$ROOT/bin/fm-pr-auto-merge.sh" task-7 https://github.com/acme/app/pull/8 >/dev/null 2>&1; then
+if try_merge; then
   fail "failed Cypress was allowed to auto-merge"
 fi
 

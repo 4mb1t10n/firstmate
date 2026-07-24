@@ -26,9 +26,13 @@ The agent-only `reconciliation-heartbeat` skill owns the reasoning procedure Fir
 
 The next interval is:
 
-- 10 minutes when an issue lease, crew, validation run, or open PR is active.
+- 10 minutes when an issue lease, crew, validation run, or open PR is active, including when every issue is already closed.
 - 30 minutes when open issues exist but no work is active.
-- 2 hours only when configured repositories contain zero open issues.
+- 2 hours only when there is neither open nor active work.
+
+Active work, not the open issue count, selects the fast cadence and requires an acknowledgement: closing the last issue does not end supervision of a crew, a lease, or an open PR.
+
+A validation record counts as active work only while its task still exists, because the record itself is durable evidence that is never cleaned.
 
 `state/reconcile/last.json` persists the next due epoch.
 
@@ -47,6 +51,10 @@ The host supervisor may therefore call it on every short supervisor cycle.
 `state/reconcile/pending` is the watcher latch.
 
 `state/reconcile/leases/*.json` maps GitHub issues to First Mate tasks.
+
+Every lease is cross-checked against the live task ids each cycle.
+
+A lease whose task no longer exists is reported as an orphan to repair rather than accepted as proof of an owner, so a dead crew cannot keep vouching for a remote `in-progress` label.
 
 `state/reconcile/lease-history.jsonl` preserves released lease evidence.
 
@@ -84,7 +92,23 @@ An open issue inventory is `action-required` until First Mate accounts for the w
 
 All merge checks are fail-closed.
 
+The Greptile gate reads only the latest Greptile review or comment posted after the current head commit, and that review must carry its own score field reading exactly 5/5.
+
+A score from an earlier revision, a score from a Greptile lookalike author, a superseded score, and prose that merely contains `5/5` all refuse the merge.
+
 The automatic merge command never edits code or tests and never relaxes a CI condition.
+
+## Process ownership
+
+`bin/fm-process-inventory.sh` classifies heavyweight child processes and resolves ownership by walking the parent chain, because a crew's Chrome or Cypress child usually carries the worktree path only on the crew leader.
+
+A process whose chain resolves to exactly one task worktree is `owned`.
+
+A process whose chain matches several worktrees is `ambiguous`.
+
+The captain pane, the reconciliation's own ancestry, and the supervision plane are `protected`.
+
+Only a process proven to belong to nobody is `unowned`, and only an old `unowned` process is offered as a cleanup candidate.
 
 ## Host integration
 

@@ -33,7 +33,7 @@ command -v gh-axi >/dev/null 2>&1 || { printf 'fm-pr-auto-merge: gh-axi not foun
 }
 
 view=$(gh pr view "$FM_PR_NUMBER" --repo "$FM_PR_OWNER/$FM_PR_REPO" \
-  --json number,url,state,baseRefName,headRefOid,mergeable,statusCheckRollup,reviews,comments)
+  --json number,url,state,baseRefName,headRefOid,mergeable,statusCheckRollup,reviews,comments,commits)
 state=$(printf '%s' "$view" | jq -r '.state')
 base=$(printf '%s' "$view" | jq -r '.baseRefName')
 head=$(printf '%s' "$view" | jq -r '.headRefOid')
@@ -71,15 +71,45 @@ has_cypress=$(printf '%s' "$checks" | jq '[.[] | select(.name | test("cypress"; 
 [ "$has_migration" -gt 0 ] || { printf 'fm-pr-auto-merge: required Migration Drift check is missing\n' >&2; exit 1; }
 [ "$has_cypress" -gt 0 ] || { printf 'fm-pr-auto-merge: required Cypress check is missing\n' >&2; exit 1; }
 
-greptile_text=$(printf '%s' "$view" | jq -r '
-  [
-    (.reviews[]? | select((.author.login // "") | test("greptile"; "i")) | .body),
-    (.comments[]? | select((.author.login // "") | test("greptile"; "i")) | .body)
-  ] | map(select(. != null)) | join("\n")
+# Greptile's verdict only counts for the code being merged, so the score is read
+# from the latest Greptile review or comment posted after the current head
+# commit. A score from an earlier revision is stale evidence, not approval.
+head_committed_at=$(printf '%s' "$view" | jq -r --arg head "$head" '
+  [.commits[]? | select((.oid // "") == $head) | (.committedDate // "")]
+  | map(select(. != "")) | first // ""
 ')
-printf '%s\n' "$greptile_text" | grep -E '(^|[^0-9])5[[:space:]]*/[[:space:]]*5([^0-9]|$)' >/dev/null || {
-  printf 'fm-pr-auto-merge: Greptile 5/5 evidence is missing\n' >&2
+[ -n "$head_committed_at" ] || {
+  printf 'fm-pr-auto-merge: current PR head has no dated commit to date Greptile against\n' >&2
   exit 1
 }
+
+greptile_body=$(printf '%s' "$view" | jq -r --arg since "$head_committed_at" '
+  [
+    (.reviews[]? | {at:(.submittedAt // ""), body:(.body // ""), login:(.author.login // "")}),
+    (.comments[]? | {at:(.createdAt // ""), body:(.body // ""), login:(.author.login // "")})
+  ]
+  | map(select((.login | test("greptile"; "i")) and .at > $since))
+  | sort_by(.at)
+  | last
+  | if . == null then "" else .body end
+')
+[ -n "$greptile_body" ] || {
+  printf 'fm-pr-auto-merge: no Greptile review posted after the current head commit\n' >&2
+  exit 1
+}
+
+# The verdict must be Greptile's own score field, so prose that merely contains
+# "5/5" cannot authorize a merge and any non-5 score refuses.
+score_fields=$(printf '%s\n' "$greptile_body" | tr -d '\r' \
+  | grep -Eio '^[^0-9]*score[^0-9]*[0-9]+(\.[0-9]+)?[[:space:]]*/[[:space:]]*5' || true)
+[ -n "$score_fields" ] || {
+  printf 'fm-pr-auto-merge: latest Greptile review has no score field\n' >&2
+  exit 1
+}
+if printf '%s\n' "$score_fields" | grep -Eqv '[^0-9]5[[:space:]]*/[[:space:]]*5$'; then
+  printf 'fm-pr-auto-merge: Greptile score is not exactly 5/5\n' >&2
+  printf '%s\n' "$score_fields" >&2
+  exit 1
+fi
 
 gh-axi pr merge "$FM_PR_NUMBER" --repo "$FM_PR_OWNER/$FM_PR_REPO" --squash --delete-branch
