@@ -18,13 +18,21 @@ disable_project_settings: true
 # definition that .github/workflows/ci.yml also invokes, so local can never
 # diverge from CI again (parity asserted by tests/fm-lint.test.sh).
 #
+# It first bootstraps the pin the same way CI does, because bin/fm-lint.sh
+# refuses any ShellCheck other than the pinned version and the gate runs each
+# step in a fresh environment with nothing on PATH. Plain `bin/fm-lint.sh` there
+# exited 127 and the gate had no lint at all, so the command installs the
+# repository-pinned, checksum-verified host build into a throwaway directory,
+# puts only that directory ahead of PATH, and removes it on exit. Nothing
+# outside this command has to be pre-installed, and no state survives the run.
+#
 # Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
 # Test is intent-targeted validation of whether the change meets its brief;
 # .github/workflows/ci.yml owns broad regression (behavior suite, platform,
 # security, Herdr, tmux, and lifecycle coverage). A full-suite override here
 # would duplicate CI and defeat the targeted Test contract.
 commands:
-  lint: 'bin/fm-lint.sh'
+  lint: 'set -eu; d=$(mktemp -d "${TMPDIR:-/tmp}/fm-lint.XXXXXX"); trap ''rm -rf "$d"'' EXIT; bin/fm-install-shellcheck.sh "$d" >&2; PATH="$d:$PATH" bin/fm-lint.sh'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:

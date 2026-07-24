@@ -11,7 +11,11 @@
 # SC2015, SC1007, and SC2034. A second axis was tool-version skew: CI's
 # ShellCheck floated with the runner image and still emitted SC2015, which
 # ShellCheck retired in 0.11.0. fm-lint.sh now pins one exact version and both
-# gates resolve it, so command, file set, config, AND version all match.
+# gates resolve it, so command, file set, config, AND version all match. A third
+# axis was availability: the gate runs each step in a fresh environment, so a
+# commands.lint that assumed an installed ShellCheck just exited 127 on the
+# parity refusal and linted nothing. Both gates now install the pin themselves,
+# which is why the tests below drive the configured command end to end.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -56,9 +60,25 @@ test_ci_invokes_the_owner() {
   pass "CI lint job calls the one-owner script, not an inline command"
 }
 
+# nm_lint_command: the exact shell command the gate runs for its lint step,
+# unescaped from .no-mistakes.yaml's single-line single-quoted scalar (where ''
+# is one literal quote). The tests below drive THIS string, so they prove the
+# configured command rather than a re-spelling of it.
+nm_lint_command() {
+  sed -n "s/^  lint: '\(.*\)'$/\1/p" "$NM" | sed "s/''/'/g"
+}
+
 test_nomistakes_invokes_the_owner() {
-  grep -Fqx "  lint: 'bin/fm-lint.sh'" "$NM" || fail "no-mistakes commands.lint must map exactly to the one-owner script"
-  pass "no-mistakes pre-push lint calls the one-owner script"
+  local cmd
+  cmd=$(nm_lint_command)
+  [ -n "$cmd" ] || fail "no-mistakes commands.lint must be a single-line single-quoted command"
+  assert_contains "$cmd" "bin/fm-lint.sh" "no-mistakes commands.lint must run the one-owner script"
+  # Bootstrapping the pin is part of the configured command: the gate runs each
+  # step in a fresh environment, and fm-lint.sh refuses any other version.
+  assert_contains "$cmd" "bin/fm-install-shellcheck.sh" "no-mistakes commands.lint must install the pinned ShellCheck itself"
+  # Guard against regression to an inline re-spelling of the lint definition.
+  assert_not_contains "$cmd" "$CANON" "no-mistakes commands.lint must call fm-lint.sh, not re-spell shellcheck inline"
+  pass "no-mistakes pre-push lint bootstraps the pin and calls the one-owner script"
 }
 
 test_pins_an_explicit_version() {
@@ -151,12 +171,56 @@ EOF
   pass "ShellCheck installer resolves the pinned build for the host platform"
 }
 
+# fake_pinned_toolchain <fakebin>: shadow the tools the installer shells out to,
+# so an installer run needs no network. `tar` materializes a stub ShellCheck that
+# reports the pinned version and, on a lint run, exits with
+# FM_FAKE_SHELLCHECK_EXIT - so a caller can drive the installed binary's verdict.
+# The installer resolves one pinned build per platform, so this fixture's single
+# hardcoded checksum is only the linux.x86_64 one; the platform is pinned to
+# match, leaving the behaviour under test as the only variable. The caller
+# supplies `curl`, which is what each test varies.
+fake_pinned_toolchain() {
+  local fakebin=$1
+  cat > "$fakebin/sha256sum" <<'SH'
+#!/usr/bin/env bash
+printf '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  %s\n' "$1"
+SH
+  cat > "$fakebin/tar" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-C" ]; then
+    mkdir -p "$2/shellcheck-v0.11.0"
+    cat > "$2/shellcheck-v0.11.0/shellcheck" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+printf 'fm-fake-shellcheck linted %s paths\n' "$#"
+exit "${FM_FAKE_SHELLCHECK_EXIT:-0}"
+EOF
+    chmod +x "$2/shellcheck-v0.11.0/shellcheck"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  fake_uname "$fakebin" Linux x86_64
+  chmod +x "$fakebin/sha256sum" "$fakebin/tar" "$fakebin/sleep"
+}
+
 test_installer_retries_transient_download_failure() {
   local tmp fakebin destination out
   tmp=$(fm_test_tmproot fm-shellcheck-download)
   fakebin=$(fm_fakebin "$tmp")
   destination="$tmp/bin"
 
+  fake_pinned_toolchain "$fakebin"
   cat > "$fakebin/curl" <<'SH'
 #!/usr/bin/env bash
 count=0
@@ -173,35 +237,7 @@ while [ "$#" -gt 0 ]; do
 done
 exit 2
 SH
-  cat > "$fakebin/sha256sum" <<'SH'
-#!/usr/bin/env bash
-printf '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  %s\n' "$1"
-SH
-  cat > "$fakebin/tar" <<'SH'
-#!/usr/bin/env bash
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-C" ]; then
-    mkdir -p "$2/shellcheck-v0.11.0"
-    cat > "$2/shellcheck-v0.11.0/shellcheck" <<'EOF'
-#!/usr/bin/env bash
-printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
-EOF
-    chmod +x "$2/shellcheck-v0.11.0/shellcheck"
-    exit 0
-  fi
-  shift
-done
-exit 2
-SH
-  cat > "$fakebin/sleep" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  # The installer resolves one pinned build per platform, so this fixture's
-  # single hardcoded checksum is only the linux.x86_64 one. Pin the platform so
-  # the retry behaviour under test is what varies, not the host running it.
-  fake_uname "$fakebin" Linux x86_64
-  chmod +x "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar" "$fakebin/sleep"
+  chmod +x "$fakebin/curl"
 
   out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
     || fail "installer did not recover from a transient download failure"$'\n'"$out"
@@ -209,6 +245,54 @@ SH
   assert_contains "$out" "download attempt 1 failed; retrying" "installer did not disclose its retry"
   [ -x "$destination/shellcheck" ] || fail "installer did not install ShellCheck after retrying"
   pass "ShellCheck installer retries a transient download failure"
+}
+
+test_nomistakes_lint_bootstraps_the_pin() {
+  # Regression: commands.lint was a bare `bin/fm-lint.sh`, but the gate runs its
+  # lint step in a fresh environment with no ShellCheck on PATH, so the pre-push
+  # lint exited 127 on the parity refusal and the gate had no lint at all - the
+  # same blind spot the configured command was added to close. The configured
+  # command must install the pin itself, lint under exactly that build, hand back
+  # ShellCheck's own exit status, and leave nothing behind. Driven through the
+  # real installer and the real one-owner script with a stubbed download, so it
+  # proves the whole configured command rather than any part of it in isolation.
+  local cmd tmp fakebin scratch out rc
+  cmd=$(nm_lint_command)
+  tmp=$(fm_test_tmproot fm-lint-gate)
+  fakebin=$(fm_fakebin "$tmp")
+  scratch="$tmp/tmpdir"
+  mkdir -p "$scratch"
+
+  fake_pinned_toolchain "$fakebin"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    : > "$2"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  chmod +x "$fakebin/curl"
+
+  # TMPDIR is redirected into the fixture so the directory the command creates
+  # is observable: an empty scratch afterwards is the cleanup proof.
+  rc=0
+  out=$(cd "$ROOT" && TMPDIR="$scratch" PATH="$fakebin:$PATH" FM_FAKE_SHELLCHECK_EXIT=0 sh -c "$cmd" 2>&1) || rc=$?
+  expect_code 0 "$rc" "configured lint command failed with no ShellCheck on PATH"$'\n'"$out"
+  assert_contains "$out" "fm-fake-shellcheck" "configured lint command did not lint with the ShellCheck it installed"
+  assert_contains "$out" "(pinned $REQUIRED)" "configured lint command did not resolve the pinned ShellCheck"
+  [ -z "$(ls -A "$scratch")" ] || fail "configured lint command left its ShellCheck directory behind"
+
+  # A finding must reach the gate as a failure: an exit status swallowed by the
+  # bootstrap would report a passing lint that never ran clean.
+  rc=0
+  out=$(cd "$ROOT" && TMPDIR="$scratch" PATH="$fakebin:$PATH" FM_FAKE_SHELLCHECK_EXIT=3 sh -c "$cmd" 2>&1) || rc=$?
+  expect_code 3 "$rc" "configured lint command did not propagate ShellCheck's exit status"$'\n'"$out"
+  [ -z "$(ls -A "$scratch")" ] || fail "configured lint command left its ShellCheck directory behind after a finding"
+  pass "configured lint command bootstraps the pin, propagates lint status, and cleans up"
 }
 
 test_rejects_wrong_shellcheck_version() {
@@ -319,6 +403,7 @@ test_pins_an_explicit_version
 test_ci_installs_and_logs_the_pinned_version
 test_installer_pins_a_build_for_every_supported_platform
 test_installer_retries_transient_download_failure
+test_nomistakes_lint_bootstraps_the_pin
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
