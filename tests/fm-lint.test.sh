@@ -80,6 +80,77 @@ test_ci_installs_and_logs_the_pinned_version() {
   pass "CI installs and logs the pinned ShellCheck version from the one owner"
 }
 
+# fake_uname <fakebin> <sysname> <machine>: shadow uname so a test can pin the
+# platform the installer resolves, independently of the host running the suite.
+fake_uname() {
+  local fakebin=$1 sysname=$2 machine=$3
+  cat > "$fakebin/uname" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  -s) printf '%s\n' '$sysname' ;;
+  -m) printf '%s\n' '$machine' ;;
+  *) printf '%s\n' '$sysname' ;;
+esac
+SH
+  chmod +x "$fakebin/uname"
+}
+
+test_installer_pins_a_build_for_every_supported_platform() {
+  # Regression: the installer hardcoded CI's linux.x86_64 archive, so the pinned
+  # ShellCheck could not be installed anywhere else. bin/fm-lint.sh refuses any
+  # other version for CI parity, so on a developer machine the canonical lint -
+  # the same command .no-mistakes.yaml commands.lint runs - exited 127 and the
+  # pre-push gate had no lint at all. Each platform must resolve its own pinned
+  # archive, and an unsupported one must say so instead of installing a
+  # mismatched build.
+  local tmp fakebin urls out rc sysname machine slug
+  tmp=$(fm_test_tmproot fm-shellcheck-platform)
+  fakebin=$(fm_fakebin "$tmp")
+  urls="$tmp/urls"
+
+  # curl records the archive it was asked for and fails, so the platform
+  # mapping is observable without a per-platform download.
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in https://*) printf '%s\n' "$arg" >> "$CURL_URLS" ;; esac
+done
+exit 22
+SH
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/curl" "$fakebin/sleep"
+
+  while read -r sysname machine slug; do
+    [ -n "$sysname" ] || continue
+    : > "$urls"
+    fake_uname "$fakebin" "$sysname" "$machine"
+    rc=0
+    out=$(CURL_URLS="$urls" PATH="$fakebin:$PATH" "$INSTALLER" "$tmp/bin" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "installer reported success without a download ($sysname.$machine)"
+    assert_grep "shellcheck-v$REQUIRED.$slug.tar.xz" "$urls" \
+      "installer did not request the pinned $slug build on $sysname.$machine"$'\n'"$out"
+  done <<EOF
+Linux x86_64 linux.x86_64
+Linux aarch64 linux.aarch64
+Linux arm64 linux.aarch64
+Darwin x86_64 darwin.x86_64
+Darwin arm64 darwin.aarch64
+Darwin aarch64 darwin.aarch64
+EOF
+
+  : > "$urls"
+  fake_uname "$fakebin" Plan9 vax
+  rc=0
+  out=$(CURL_URLS="$urls" PATH="$fakebin:$PATH" "$INSTALLER" "$tmp/bin" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer accepted a platform it has no pinned build for"
+  assert_contains "$out" "no pinned ShellCheck" "installer did not name the unsupported platform refusal"
+  [ ! -s "$urls" ] || fail "installer downloaded an archive for an unsupported platform"
+  pass "ShellCheck installer resolves the pinned build for the host platform"
+}
+
 test_installer_retries_transient_download_failure() {
   local tmp fakebin destination out
   tmp=$(fm_test_tmproot fm-shellcheck-download)
@@ -126,6 +197,10 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
+  # The installer resolves one pinned build per platform, so this fixture's
+  # single hardcoded checksum is only the linux.x86_64 one. Pin the platform so
+  # the retry behaviour under test is what varies, not the host running it.
+  fake_uname "$fakebin" Linux x86_64
   chmod +x "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar" "$fakebin/sleep"
 
   out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
@@ -242,6 +317,7 @@ test_ci_invokes_the_owner
 test_nomistakes_invokes_the_owner
 test_pins_an_explicit_version
 test_ci_installs_and_logs_the_pinned_version
+test_installer_pins_a_build_for_every_supported_platform
 test_installer_retries_transient_download_failure
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect

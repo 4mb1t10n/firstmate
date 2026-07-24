@@ -71,7 +71,8 @@
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute from a second
 # session.
-# Only the five mutating sweeps and the wake-queue drain are skipped.
+# Only the five mutating sweeps, the reconciliation tick, and the wake-queue
+# drain are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
@@ -262,8 +263,9 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
     printf '●  %s\n' "$LOCK_OUT"
     printf '●  Skipping every mutating step: PR-check migration, secondmate sync,\n'
-    printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
-    printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
+    printf '●  X-mode artifacts, fleet sync, reconciliation, and wake-queue drain.\n'
+    printf '●  Detect-only bootstrap diagnostics and the rest of this read-only-safe\n'
+    printf '●  digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
     printf '●  otherwise mutate fleet state from this session.\n'
     printf '%s\n' "$BAR"

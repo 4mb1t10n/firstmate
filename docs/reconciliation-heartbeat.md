@@ -20,6 +20,10 @@ Every open issue in every configured project repository is authorized work.
 
 `bin/fm-pr-auto-merge.sh` owns the strict automatic feature-to-`stg` merge gate.
 
+It performs no merge of its own: once every gate passes it lands the PR through `bin/fm-pr-merge.sh`, so the canonical `pr=` and the forge's exact `pr_head=` are recorded before the squash and teardown can still verify the landed work.
+
+That delegation is the whole authority for the call and reaches only the gated feature-to-`stg` path; every other merge still needs the captain's explicit word or `yolo`.
+
 The agent-only `reconciliation-heartbeat` skill owns the reasoning procedure First Mate follows after the deterministic service wakes it.
 
 ## Cadence

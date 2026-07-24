@@ -26,7 +26,14 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "$1 $2" in
   "label create") exit 0 ;;
   "issue edit") exit 0 ;;
-  "pr view") cat "$FM_TEST_PR_VIEW" ;;
+  "pr view")
+    # fm-pr-check.sh, reached through fm-pr-merge.sh, asks only for the head
+    # commit; the auto-merge gate asks for the whole PR view.
+    case " $* " in
+      *" --json headRefOid "*) printf '%s\n' "$FM_TEST_PR_HEAD" ;;
+      *) cat "$FM_TEST_PR_VIEW" ;;
+    esac
+    ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 2 ;;
 esac
 EOF
@@ -80,8 +87,22 @@ grep -F 'issue edit 7 --repo acme/app --remove-label in-progress' "$GH_LOG" >/de
   || fail "release retained the active lease"
 pass "in-progress is an exclusive durable issue lease"
 
-HEAD_SHA=abcdef1234567890
+HEAD_SHA=abcdef1234567890abcdef1234567890abcdef12
 FM_HOME="$HOME_DIR" "$ROOT/bin/fm-validation-record.sh" task-7 "$HEAD_SHA" run-1 >/dev/null
+
+# The automatic merge lands through bin/fm-pr-merge.sh, which records the task's
+# PR metadata before merging, so the task needs the same real meta any PR task
+# has and a worktree the pr_head lookup can run in.
+WORKTREE="$TMP/wt-task-7"
+mkdir -p "$WORKTREE"
+cat > "$STATE/task-7.meta" <<EOF
+window=fm-task-7
+worktree=$WORKTREE
+project=$WORKTREE
+kind=ship
+mode=no-mistakes
+EOF
+chmod 0600 "$STATE/task-7.meta"
 
 HEAD_AT=2026-07-24T10:00:00Z
 # A fully gated PR, rewritten before each case so every refusal below has
@@ -124,12 +145,23 @@ try_merge() {
   : > "$GH_AXI_LOG"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
     FM_TEST_GH_LOG="$GH_LOG" FM_TEST_GH_AXI_LOG="$GH_AXI_LOG" FM_TEST_PR_VIEW="$PR_VIEW" \
+    FM_TEST_PR_HEAD="$HEAD_SHA" \
     "$ROOT/bin/fm-pr-auto-merge.sh" task-7 https://github.com/acme/app/pull/8 >/dev/null 2>&1
 }
 
 try_merge || fail "fully gated PR was not merged"
 grep -F 'pr merge 8 --repo acme/app --squash --delete-branch' "$GH_AXI_LOG" >/dev/null \
   || fail "fully gated PR was not merged"
+
+# The gate is not a lower-level merge command around fm-pr-merge.sh's guards: it
+# delegates to it, so the canonical pr= and the forge's exact pr_head= are
+# recorded before the squash and bin/fm-teardown.sh can still verify the landed
+# work once the branch is gone.
+grep -qxF 'pr=https://github.com/acme/app/pull/8' "$STATE/task-7.meta" \
+  || fail "automatic merge did not record pr= through fm-pr-merge.sh"
+grep -qxF "pr_head=$HEAD_SHA" "$STATE/task-7.meta" \
+  || fail "automatic merge did not record the exact pr_head= before merging"
+pass "automatic merge records PR metadata through fm-pr-merge.sh before merging"
 
 set_reviews '[{"author":{"login":"greptile-apps"},"submittedAt":"2026-07-23T09:30:00Z","body":"Quality score: 5/5"}]'
 if try_merge; then fail "a 5/5 predating the current head authorized the merge"; fi
@@ -194,6 +226,13 @@ mutate_pr_view '.mergeable = "CONFLICTING"'
 if try_merge; then fail "a conflicted PR was allowed to auto-merge"; fi
 [ ! -s "$GH_AXI_LOG" ] || fail "a conflicted PR still invoked merge"
 
+# The delegation to fm-pr-merge.sh is reachable only from the gated feature-to-
+# stg path: every other base keeps the captain's explicit word (or yolo) as the
+# only merge authority, so the gate refuses before it ever delegates.
+mutate_pr_view '.baseRefName = "main"'
+if try_merge; then fail "a PR based on main was allowed to auto-merge"; fi
+[ ! -s "$GH_AXI_LOG" ] || fail "a non-stg base still invoked merge"
+
 # The recorded evidence names one exact commit, so a PR that gained a commit
 # after validation has no complete No Mistakes run for what would be merged.
 mutate_pr_view '.headRefOid = "999999999999cafe"
@@ -210,3 +249,21 @@ if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
 fi
 
 pass "automatic merge requires exact No Mistakes evidence and every mandatory green gate"
+
+# Authority isolation: passing every gate authorizes this one merge, it does not
+# grant a standing right to merge around fm-pr-merge.sh. A task whose metadata
+# cannot be recorded is refused at the merge step with every gate green, and
+# nothing is merged.
+write_pr_view
+FM_HOME="$HOME_DIR" "$ROOT/bin/fm-validation-record.sh" task-nometa "$HEAD_SHA" run-2 >/dev/null
+: > "$GH_AXI_LOG"
+if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
+    FM_TEST_GH_LOG="$GH_LOG" FM_TEST_GH_AXI_LOG="$GH_AXI_LOG" FM_TEST_PR_VIEW="$PR_VIEW" \
+    FM_TEST_PR_HEAD="$HEAD_SHA" \
+    "$ROOT/bin/fm-pr-auto-merge.sh" task-nometa https://github.com/acme/app/pull/8 \
+    >/dev/null 2>&1; then
+  fail "a task whose PR metadata could not be recorded was auto-merged"
+fi
+[ ! -s "$GH_AXI_LOG" ] || fail "an unrecordable task still invoked merge"
+
+pass "automatic merge cannot merge around fm-pr-merge.sh's own guards"
