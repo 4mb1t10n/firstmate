@@ -12,10 +12,17 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 TASK=${1:?usage: fm-pr-auto-merge.sh <task-id> <pr-url>}
 PR_URL=${2:?usage: fm-pr-auto-merge.sh <task-id> <pr-url>}
-EVIDENCE="$STATE/reconcile/validation/$TASK.json"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+
+# Both arguments are validated before either one is used: the task id addresses
+# the evidence file that anchors this gate's trust, and the PR reference reaches
+# gh only as a parsed number and owner/repository pair.
+case "$TASK" in *[!A-Za-z0-9._-]*|'') printf 'fm-pr-auto-merge: invalid task id\n' >&2; exit 2 ;; esac
+fm_pr_url_parse "$PR_URL" || { printf 'fm-pr-auto-merge: invalid GitHub PR URL\n' >&2; exit 2; }
+[ "$FM_PR_PROVIDER" = github ] || { printf 'fm-pr-auto-merge: automatic merge supports GitHub only\n' >&2; exit 2; }
+EVIDENCE="$STATE/reconcile/validation/$TASK.json"
 
 command -v jq >/dev/null 2>&1 || { printf 'fm-pr-auto-merge: jq not found\n' >&2; exit 1; }
 command -v gh >/dev/null 2>&1 || { printf 'fm-pr-auto-merge: gh not found\n' >&2; exit 1; }
@@ -25,7 +32,7 @@ command -v gh-axi >/dev/null 2>&1 || { printf 'fm-pr-auto-merge: gh-axi not foun
   exit 1
 }
 
-view=$(gh pr view "$PR_URL" \
+view=$(gh pr view "$FM_PR_NUMBER" --repo "$FM_PR_OWNER/$FM_PR_REPO" \
   --json number,url,state,baseRefName,headRefOid,mergeable,statusCheckRollup,reviews,comments)
 state=$(printf '%s' "$view" | jq -r '.state')
 base=$(printf '%s' "$view" | jq -r '.baseRefName')
@@ -75,6 +82,4 @@ printf '%s\n' "$greptile_text" | grep -E '(^|[^0-9])5[[:space:]]*/[[:space:]]*5(
   exit 1
 }
 
-fm_pr_url_parse "$PR_URL" || { printf 'fm-pr-auto-merge: invalid GitHub PR URL\n' >&2; exit 2; }
-[ "$FM_PR_PROVIDER" = github ] || { printf 'fm-pr-auto-merge: automatic merge supports GitHub only\n' >&2; exit 2; }
 gh-axi pr merge "$FM_PR_NUMBER" --repo "$FM_PR_OWNER/$FM_PR_REPO" --squash --delete-branch

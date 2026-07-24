@@ -47,11 +47,16 @@ command -v gh >/dev/null 2>&1 || { printf 'fm-issue-lease: gh not found\n' >&2; 
 mkdir -p "$DIR"
 chmod 0700 "$STATE/reconcile" "$DIR" 2>/dev/null || true
 
-cleanup() {
-  rmdir "$LOCK" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
-while ! mkdir "$LOCK" 2>/dev/null; do sleep 0.1; done
+# The lease lock is held across GitHub calls, so it uses the shared helpers
+# rather than a bare mkdir spin: they record the holder pid, verify ownership on
+# release, and steal a lock whose holder died without releasing it. Acquire
+# first, then install the release trap, so a signal received while waiting can
+# never free the lock another process legitimately owns.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+fm_lock_acquire_wait "$LOCK"
+trap 'fm_lock_release "$LOCK" || true' EXIT
+trap 'exit 1' INT TERM
 
 case "$ACTION" in
   reserve)

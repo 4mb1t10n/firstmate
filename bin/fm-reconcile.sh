@@ -72,14 +72,8 @@ command -v jq >/dev/null 2>&1 || { printf 'fm-reconcile: jq not found\n' >&2; ex
 mkdir -p "$RECONCILE_DIR"
 chmod 0700 "$RECONCILE_DIR" 2>/dev/null || true
 
-cleanup() {
-  rmdir "$LOCK" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
-if ! mkdir "$LOCK" 2>/dev/null; then
-  printf 'fm-reconcile: another reconciliation owns %s\n' "$LOCK" >&2
-  exit 0
-fi
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 render() {
   if [ "$FORMAT" = json ]; then
@@ -96,13 +90,43 @@ render() {
   fi
 }
 
-if [ "$MODE" = tick ] && [ "$FORCE" = 0 ] && [ -s "$LAST" ]; then
+# The due test reads the last snapshot and makes no GitHub request, so it runs
+# BEFORE the lock: the frequent not-due supervisor polls must never contend for
+# the lock a slow due tick is holding across its inventory.
+tick_not_due() {
+  local next_due
+  [ "$MODE" = tick ] || return 1
+  [ "$FORCE" = 0 ] || return 1
+  [ -s "$LAST" ] || return 1
   next_due=$(jq -r '.next_due_epoch // 0' "$LAST" 2>/dev/null || printf 0)
   case "$next_due" in ''|*[!0-9]*) next_due=0 ;; esac
-  if [ "$NOW_EPOCH" -lt "$next_due" ]; then
-    jq --arg tick not-due '. + {tick:$tick}' "$LAST" | render
-    exit 0
-  fi
+  [ "$NOW_EPOCH" -lt "$next_due" ]
+}
+
+report_not_due() {
+  jq --arg tick not-due '. + {tick:$tick}' "$LAST" | render
+}
+
+if tick_not_due; then
+  report_not_due
+  exit 0
+fi
+
+# Acquire before installing any release trap: a losing racer must never free the
+# winner's lock. fm_lock_release verifies the recorded holder pid, and
+# fm_lock_try_acquire steals a lock whose holder died without releasing it.
+if ! fm_lock_try_acquire "$LOCK"; then
+  printf 'fm-reconcile: another reconciliation owns %s\n' "$LOCK" >&2
+  exit 0
+fi
+trap 'fm_lock_release "$LOCK" || true' EXIT
+trap 'exit 1' INT TERM
+
+# Re-test under the lock: a tick that arrived while the previous holder was
+# still inventorying must not immediately repeat the cycle that holder finished.
+if tick_not_due; then
+  report_not_due
+  exit 0
 fi
 
 command -v gh >/dev/null 2>&1 || { printf 'fm-reconcile: gh not found\n' >&2; exit 1; }
@@ -275,22 +299,28 @@ if [ -s "$ISSUED" ]; then
   fi
 fi
 
-ack_json=null
+ack_json='{"required":false,"token":null,"previous_unacked":false}'
 token=
 new_token=false
 if [ "$open_count" -gt 0 ] || [ "$error_count" -gt 0 ] || [ "$old_unowned_count" -gt 0 ] \
     || [ -n "$outstanding_token" ]; then
   if [ -n "$outstanding_token" ]; then
     token=$outstanding_token
-  else
+  elif [ "$MODE" = tick ]; then
     token="${NOW_EPOCH}-$$"
     outstanding_epoch=$NOW_EPOCH
     new_token=true
   fi
-  ack_json=$(jq -n --arg token "$token" --argjson previous_unacked "$previous_unacked" \
-    '{required:true,token:$token,previous_unacked:$previous_unacked}')
-else
-  ack_json='{"required":false,"token":null,"previous_unacked":false}'
+  # Only a tick persists issued.json, so only a tick may mint a token. An
+  # inspect reports that an acknowledgement is required and reuses an
+  # outstanding token, but never advertises one that could never be accepted.
+  if [ -n "$token" ]; then
+    ack_json=$(jq -n --arg token "$token" --argjson previous_unacked "$previous_unacked" \
+      '{required:true,token:$token,previous_unacked:$previous_unacked}')
+  else
+    ack_json=$(jq -n --argjson previous_unacked "$previous_unacked" \
+      '{required:true,token:null,previous_unacked:$previous_unacked}')
+  fi
 fi
 
 snapshot=$(jq -n \
@@ -339,10 +369,14 @@ snapshot=$(jq -n \
     ack:$ack
   }')
 
-tmp="$RECONCILE_DIR/last.json.tmp.$$"
-printf '%s\n' "$snapshot" > "$tmp"
-chmod 0600 "$tmp"
-mv -f "$tmp" "$LAST"
+# last.json carries the scheduler's next_due_epoch, so only a tick persists it.
+# An inspect is a read-only view and must never postpone the next heartbeat.
+if [ "$MODE" = tick ]; then
+  tmp="$RECONCILE_DIR/last.json.tmp.$$"
+  printf '%s\n' "$snapshot" > "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$LAST"
+fi
 
 if [ -n "$token" ] && [ "$MODE" = tick ]; then
   if [ "$new_token" = true ]; then
@@ -352,8 +386,6 @@ if [ -n "$token" ] && [ "$MODE" = tick ]; then
     chmod 0600 "$issued_tmp"
     mv -f "$issued_tmp" "$ISSUED"
   fi
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
   payload="reconcile: token=$token open=$open_count available=$available_count in-progress=$in_progress_count orphaned=$orphaned_count prs=$pr_count snapshot=$LAST"
   fm_wake_append reconcile "$token" "$payload"
   pending_tmp="$RECONCILE_DIR/pending.tmp.$$"

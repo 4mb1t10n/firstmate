@@ -56,13 +56,23 @@ The ordinary durable wake queue carries a `reconcile` record for every actionabl
 
 ## Watcher integration
 
-The normal watcher checks `state/reconcile/pending` on every poll.
+The normal watcher checks `state/reconcile/pending` on every poll, after its signal, stale, and check scans.
 
 It exits with the recorded `reconcile:` reason without deleting the latch.
 
 Only a matching acknowledgement removes the latch.
 
 Rearming supervision without acknowledgement therefore resurfaces the same required reconciliation.
+
+The re-surface is bounded: a token this home has not yet surfaced wakes immediately, and the same unacknowledged token wakes again only once every `FM_RECONCILE_RESURFACE_SECS` (default 600).
+
+Between those re-surfaces the watcher keeps triaging crew signals, stale panes, and slow checks normally.
+
+`--tick` owns every durable write.
+
+`--inspect` performs the same inventory as a read-only view: it never writes `state/reconcile/last.json`, never postpones the next due epoch, and never mints an acknowledgement token it could not accept.
+
+An inspect still reports an outstanding token so it can be acknowledged, and reports `required` with a null token when an actionable cycle has not yet been issued by a tick.
 
 ## Failure behavior
 

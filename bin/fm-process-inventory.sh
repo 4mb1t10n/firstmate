@@ -14,6 +14,8 @@ case "$MAX_ROWS" in ''|*[!0-9]*|0) printf 'fm-process-inventory: FM_PROCESS_MAX_
 command -v jq >/dev/null 2>&1 || { printf 'fm-process-inventory: jq not found\n' >&2; exit 1; }
 
 tasks='[]'
+task_ids=()
+task_worktrees=()
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   id=$(basename "$meta" .meta)
@@ -21,9 +23,15 @@ for meta in "$STATE"/*.meta; do
   [ -n "$worktree" ] || continue
   tasks=$(printf '%s' "$tasks" | jq --arg id "$id" --arg worktree "$worktree" \
     '. + [{id:$id,worktree:$worktree}]')
+  task_ids+=("$id")
+  task_worktrees+=("$worktree")
 done
+task_count=${#task_ids[@]}
 
-rows='[]'
+# Rows accumulate as tab-separated text and are shaped once at the end. A jq
+# fork per matching process re-serializes the whole array each time, and Chrome
+# alone routinely contributes dozens of rows to every reconciliation tick.
+rows=
 if [ "$(uname)" = Linux ]; then
   process_table=$(ps -eo pid=,ppid=,etimes=,comm=,args= 2>/dev/null \
     | awk -v OFS='\t' '{
@@ -56,28 +64,42 @@ while IFS=$(printf '\t') read -r pid ppid age command args; do
     *next-server*|*"next dev"*|*"next start"*) class=next ;;
     *) continue ;;
   esac
-  owner=$(printf '%s' "$tasks" | jq -r --arg args "$args" '
-    [.[] | select(($args | contains(.worktree)))] | if length == 1 then .[0].id else "" end
-  ')
-  owned=false
-  [ -n "$owner" ] && owned=true
+  owner=
+  matches=0
+  i=0
+  while [ "$i" -lt "$task_count" ]; do
+    case "$args" in
+      *"${task_worktrees[$i]}"*)
+        matches=$((matches + 1))
+        owner=${task_ids[$i]}
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  [ "$matches" -eq 1 ] || owner=
   old=false
   [ "$age" -ge "$OLD_SECS" ] && old=true
-  rows=$(printf '%s' "$rows" | jq \
-    --argjson pid "$pid" \
-    --argjson ppid "$ppid" \
-    --argjson age "$age" \
-    --arg class "$class" \
-    --arg owner "$owner" \
-    --argjson owned "$owned" \
-    --argjson old "$old" \
-    '. + [{pid:$pid,ppid:$ppid,age_seconds:$age,class:$class,owner:$owner,owned:$owned,old:$old}]')
+  rows="${rows}${pid}"$'\t'"${ppid}"$'\t'"${age}"$'\t'"${class}"$'\t'"${owner}"$'\t'"${old}"$'\n'
 done <<EOF
 $process_table
 EOF
 
-printf '%s' "$rows" | jq --argjson tasks "$tasks" --argjson max "$MAX_ROWS" '
-  {
+printf '%s' "$rows" | jq -R -s --argjson tasks "$tasks" --argjson max "$MAX_ROWS" '
+  [
+    split("\n")[]
+    | select(length > 0)
+    | split("\t")
+    | {
+        pid:(.[0] | tonumber),
+        ppid:(.[1] | tonumber),
+        age_seconds:(.[2] | tonumber),
+        class:.[3],
+        owner:.[4],
+        owned:(.[4] != ""),
+        old:(.[5] == "true")
+      }
+  ]
+  | {
     tasks:$tasks,
     counts:{
       total:length,

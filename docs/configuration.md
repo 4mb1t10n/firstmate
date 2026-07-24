@@ -243,7 +243,8 @@ This section owns the probe's path, executable requirement, and admit/defer exit
 ## Reconciliation heartbeat
 
 The reconciliation heartbeat inventories every open issue and pull request in the configured project registry, reconstructs issue ownership, detects orphaned `in-progress` leases, inventories heavyweight child processes, and emits a durable wake when First Mate has work to advance.
-It runs immediately at locked session start and may be called frequently by the host supervisor because not-due ticks are local-only.
+It runs immediately at locked session start under a whole-tick timeout, so a degraded forge delays recovery by a known bound instead of the per-request budget multiplied by the project registry.
+It may be called frequently by the host supervisor because not-due ticks are local-only and take no reconciliation lock.
 The default cadence is 10 minutes while crews, pull requests, or leased issues are active, 30 minutes while open work is idle, and 2 hours only when no issue remains open.
 First Mate acknowledges each actionable cycle with `bin/fm-reconcile-ack.sh <token>` after performing the reconciliation procedure in [`reconciliation-heartbeat.md`](reconciliation-heartbeat.md).
 An acknowledgement that exceeds the grace interval changes reconciliation health to `control-plane-failed`, keeping partial control-plane failure visible until the exact outstanding token is acknowledged.
@@ -404,6 +405,8 @@ FM_RECONCILE_ACK_GRACE=900   # seconds before an unacknowledged actionable cycle
 FM_RECONCILE_GH_TIMEOUT=30   # seconds allowed per bounded GitHub inventory request
 FM_RECONCILE_ISSUE_LIMIT=1000   # maximum open issues inventoried per configured repository
 FM_RECONCILE_PR_LIMIT=500   # maximum open pull requests inventoried per configured repository
+FM_RECONCILE_SESSION_START_TIMEOUT=60   # whole-tick bound for the session-start reconciliation
+FM_RECONCILE_RESURFACE_SECS=600   # watcher cadence for re-surfacing the same unacknowledged reconciliation
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code

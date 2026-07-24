@@ -279,16 +279,30 @@ fi
 # A locked primary session forces one fresh GitHub reconciliation before the
 # wake queue is drained. The tick is non-fatal so an unavailable forge becomes
 # visible in its own output without suppressing the rest of recovery.
+# The whole tick is bounded once here, not just per GitHub request: this digest
+# is produced under the session lock and prints nothing until the tick returns,
+# so a degraded forge must delay session recovery by a known, small amount
+# rather than by the per-request budget multiplied by the project registry.
+RECONCILE_TIMEOUT=${FM_RECONCILE_SESSION_START_TIMEOUT:-60}
+case "$RECONCILE_TIMEOUT" in ''|*[!0-9]*|0) RECONCILE_TIMEOUT=60 ;; esac
 subsection "RECONCILIATION"
 if [ "$READ_ONLY" -eq 1 ]; then
   printf 'skipped (read-only session)\n'
 elif [ "${FM_RECONCILE_SESSION_START:-1}" = 0 ]; then
   printf 'skipped (FM_RECONCILE_SESSION_START=0)\n'
 else
-  RECONCILE_OUT=$("$SCRIPT_DIR/fm-reconcile.sh" --tick --force 2>&1)
+  if command -v timeout >/dev/null 2>&1; then
+    RECONCILE_OUT=$(timeout "$RECONCILE_TIMEOUT" "$SCRIPT_DIR/fm-reconcile.sh" --tick --force 2>&1)
+  elif command -v gtimeout >/dev/null 2>&1; then
+    RECONCILE_OUT=$(gtimeout "$RECONCILE_TIMEOUT" "$SCRIPT_DIR/fm-reconcile.sh" --tick --force 2>&1)
+  else
+    RECONCILE_OUT=$("$SCRIPT_DIR/fm-reconcile.sh" --tick --force 2>&1)
+  fi
   RECONCILE_RC=$?
   printf '%s\n' "$RECONCILE_OUT"
-  if [ "$RECONCILE_RC" -ne 0 ]; then
+  if [ "$RECONCILE_RC" -eq 124 ]; then
+    printf 'RECONCILIATION_ERROR: tick exceeded %ss and was stopped; GitHub inventory is stale. Repair the forge connection and rerun bin/fm-reconcile.sh --tick --force before dispatch.\n' "$RECONCILE_TIMEOUT"
+  elif [ "$RECONCILE_RC" -ne 0 ]; then
     printf 'RECONCILIATION_ERROR: tick exited %s; continue recovery and repair GitHub inventory before dispatch.\n' "$RECONCILE_RC"
   fi
 fi
