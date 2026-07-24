@@ -27,10 +27,12 @@
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
-#   2. bootstrap      - detect-only diagnostics always run. The five
-#                       MUTATING sweeps (legacy PR-check migration, secondmate
-#                       fast-forward, secondmate liveness, X-mode artifact writes, fleet sync) run only
-#                       when this session actually holds the lock.
+#   2. bootstrap      - home-local stale Herdr projection cleanup runs only
+#                       when this session actually holds the lock. Detect-only
+#                       diagnostics always run. Bootstrap's five mutating sweeps
+#                       (legacy PR-check migration, secondmate fast-forward,
+#                       secondmate liveness, X-mode artifact writes, fleet sync)
+#                       also run only when locked.
 #   3. reconciliation - one forced bin/fm-reconcile.sh --tick under a whole-tick
 #                       timeout, so its actionable wake is already queued when
 #                       the drain below runs. It writes durable reconciliation
@@ -69,10 +71,10 @@
 # mode) for its read-only detect lines - missing tools, gh auth, the
 # worktree-tangle check, the harness override, crew-dispatch validation,
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
-# which mutate shared state and all of which are safe to compute from a second
-# session.
-# Only the five mutating sweeps, the reconciliation tick, and the wake-queue
-# drain are skipped.
+# which mutate shared state and all of which are safe to compute without
+# verified lock ownership.
+# Only projection cleanup, the five bootstrap mutating sweeps, the reconciliation
+# tick, and the wake-queue drain are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
@@ -260,10 +262,10 @@ if [ "$LOCK_RC" -ne 0 ]; then
   BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '%s\n' "$BAR"
-    printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
+    printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
     printf '●  %s\n' "$LOCK_OUT"
-    printf '●  Skipping every mutating step: PR-check migration, secondmate sync,\n'
-    printf '●  X-mode artifacts, fleet sync, reconciliation, and wake-queue drain.\n'
+    printf '●  Skipping every mutating step: PR-check migration, stale Herdr child cleanup,\n'
+    printf '●  secondmate sync, X-mode artifacts, fleet sync, reconciliation, and wake-queue drain.\n'
     printf '●  Detect-only bootstrap diagnostics and the rest of this read-only-safe\n'
     printf '●  digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
@@ -277,7 +279,10 @@ subsection "BOOTSTRAP"
 if [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 else
-  BOOT_OUT=$("$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+  BOOT_OUT=$(
+    "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true
+    "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
+  )
 fi
 if [ -n "$BOOT_OUT" ]; then
   printf '%s\n' "$BOOT_OUT"
@@ -321,15 +326,15 @@ fi
 # Drained records are this turn's first work queue (AGENTS.md section 8); the
 # drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
-# below. The read-only path never touches the queue (another session
-# may be actively draining it) but still runs fm-guard.sh directly with
-# non-mutating advisory text, so the same alarms surface without repair
-# commands.
+# below. The read-only path never touches the queue because it lacks mutation
+# authority, and another session may be actively draining it. It still runs
+# fm-guard.sh directly with non-mutating advisory text, so the same alarms
+# surface without repair commands.
 subsection "WAKE QUEUE"
 if [ "$READ_ONLY" -eq 1 ]; then
   QLEN=0
   [ -s "$STATE/.wake-queue" ] && QLEN=$(grep -c . "$STATE/.wake-queue" 2>/dev/null || printf '0')
-  printf 'skipped (read-only session) - %s record(s) remain queued for the session holding the lock.\n' "$QLEN"
+  printf 'skipped (read-only session) - %s record(s) remain queued because this session lacks verified fleet-lock ownership.\n' "$QLEN"
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
@@ -433,8 +438,8 @@ section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
   cat <<'EOF'
 This session did not acquire the fleet lock. Stay read-only: do not arm,
-drain, spawn, steer, merge, or repair fleet state from here. The session
-holding the lock owns mutable follow-up.
+drain, spawn, steer, merge, or repair fleet state from here. Only a session
+with verified fleet-lock ownership may perform mutable follow-up.
 
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ]; then
