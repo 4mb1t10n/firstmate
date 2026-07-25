@@ -40,7 +40,6 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-admit-queued.sh`     | Drain durable capacity-deferred heavy spawns in enqueue order under a single-drainer lock; away-supervision runs it on a cadence |
 | `fm-resource-lib.sh`     | Shared heavy-crew admission: liveness-gated slot count, in-flight reservations, headroom probe, and the durable spawn queue |
-| `fm-dispatch-select.sh`  | Resolve a dispatch rule/default to one profile, owning quota-aware arrays and random fallback |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
