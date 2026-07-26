@@ -126,7 +126,7 @@ write_pr_view() {
     {"name":"Typecheck","status":"COMPLETED","conclusion":"SUCCESS"}
   ],
   "reviews": [
-    {"author":{"login":"greptile-apps"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"}
+    {"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"}
   ],
   "comments": []
 }
@@ -163,26 +163,29 @@ grep -qxF "pr_head=$HEAD_SHA" "$STATE/task-7.meta" \
   || fail "automatic merge did not record the exact pr_head= before merging"
 pass "automatic merge records PR metadata through fm-pr-merge.sh before merging"
 
-set_reviews '[{"author":{"login":"greptile-apps"},"submittedAt":"2026-07-23T09:30:00Z","body":"Quality score: 5/5"}]'
+set_reviews '[{"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-23T09:30:00Z","body":"Quality score: 5/5"}]'
 if try_merge; then fail "a 5/5 predating the current head authorized the merge"; fi
 [ ! -s "$GH_AXI_LOG" ] || fail "stale Greptile evidence still invoked merge"
 
 set_reviews '[{"author":{"login":"helpful-bot"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"}]'
 if try_merge; then fail "a Greptile lookalike author authorized the merge"; fi
 
-set_reviews '[{"author":{"login":"greptile-apps"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 4/5"}]'
+set_reviews '[{"author":{"login":"my-greptile-bot"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"}]'
+if try_merge; then fail "a login containing greptile authorized the merge"; fi
+
+set_reviews '[{"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 4/5"}]'
 if try_merge; then fail "a 4/5 Greptile score authorized the merge"; fi
 
 set_reviews '[
-  {"author":{"login":"greptile-apps"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"},
-  {"author":{"login":"greptile-apps"},"submittedAt":"2026-07-24T12:00:00Z","body":"Quality score: 3/5"}
+  {"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"},
+  {"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-24T12:00:00Z","body":"Quality score: 3/5"}
 ]'
 if try_merge; then fail "a superseded 5/5 authorized the merge"; fi
 
-set_reviews '[{"author":{"login":"greptile-apps"},"submittedAt":"2026-07-24T11:00:00Z","body":"Reads like a 5/5 change to me, but I cannot score it."}]'
+set_reviews '[{"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-24T11:00:00Z","body":"Reads like a 5/5 change to me, but I cannot score it."}]'
 if try_merge; then fail "incidental 5/5 prose authorized the merge without a score field"; fi
 
-set_reviews '[{"author":{"login":"greptile-apps"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"}]'
+set_reviews '[{"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"}]'
 try_merge || fail "restored current 5/5 evidence did not merge"
 
 pass "automatic merge requires the latest Greptile score field, posted after the head commit, to be exactly 5/5"

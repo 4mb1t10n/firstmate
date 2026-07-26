@@ -413,4 +413,14 @@ EOF
 inventory "$CASE_TABLE" > "$PROC_OUT"
 jq -e '.counts.old_unowned == 1' "$PROC_OUT" >/dev/null \
   || fail "an abandoned process under the home was protected instead of offered for cleanup"
+
+cat > "$CASE_TABLE" <<'EOF'
+ 5000     1 90000 claude /usr/local/bin/claude
+ 5001  5000 50000 node /usr/bin/node chrome-devtools-mcp
+EOF
+printf '5000\n' > "$HOME_D/state/.lock"
+inventory "$CASE_TABLE" > "$PROC_OUT"
+jq -e '.counts.protected == 1 and .counts.old_unowned == 0' "$PROC_OUT" >/dev/null \
+  || fail "a process descended from the durable captain lock holder was offered for cleanup"
+rm -f "$HOME_D/state/.lock"
 pass "heavyweight processes inherit ownership through the parent chain, and ambiguous or supervision processes are never cleanup candidates"

@@ -8,10 +8,15 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 OLD_SECS=${FM_PROCESS_OLD_SECS:-21600}
 MAX_ROWS=${FM_PROCESS_MAX_ROWS:-200}
+CAPTAIN_PID=
 
 case "$OLD_SECS" in ''|*[!0-9]*|0) printf 'fm-process-inventory: FM_PROCESS_OLD_SECS must be positive\n' >&2; exit 2 ;; esac
 case "$MAX_ROWS" in ''|*[!0-9]*|0) printf 'fm-process-inventory: FM_PROCESS_MAX_ROWS must be positive\n' >&2; exit 2 ;; esac
 command -v jq >/dev/null 2>&1 || { printf 'fm-process-inventory: jq not found\n' >&2; exit 1; }
+if [ -s "$STATE/.lock" ]; then
+  CAPTAIN_PID=$(tr -d '[:space:]' < "$STATE/.lock")
+  case "$CAPTAIN_PID" in ''|*[!0-9]*) CAPTAIN_PID= ;; esac
+fi
 
 tasks='[]'
 task_ids=()
@@ -65,7 +70,7 @@ emit_task_rows() {
 }
 
 rows=$({ emit_task_rows; printf '%s\n' "$process_table"; } | awk -F'\t' -v OFS='\t' \
-  -v old_secs="$OLD_SECS" -v selfpid="$$" -v fm_bin="$FM_HOME/bin/" '
+  -v old_secs="$OLD_SECS" -v selfpid="$$" -v captain_pid="$CAPTAIN_PID" -v fm_bin="$FM_HOME/bin/" '
   function classify(s) {
     if (index(s, "chrome-devtools-mcp") > 0) return "devtools"
     if (index(s, "/opt/google/chrome/chrome") > 0 || s ~ /(^|\/| )google-chrome( |$)/) return "chrome"
@@ -108,6 +113,7 @@ rows=$({ emit_task_rows; printf '%s\n' "$process_table"; } | awk -F'\t' -v OFS='
   function protected(p,   hops, cur, s) {
     cur = p
     for (hops = 0; hops < 64; hops++) {
+      if (captain_valid && cur == captain_pid) return 1
       if (cur in supervision) return 1
       s = comm_of[cur] " " args_of[cur]
       if (s ~ /fm-supervise-daemon|fm-afk-|fm-watch|\/bin\/fm-[A-Za-z0-9_-]+\.sh/) return 1
@@ -132,6 +138,11 @@ rows=$({ emit_task_rows; printf '%s\n' "$process_table"; } | awk -F'\t' -v OFS='
     next
   }
   END {
+    captain_valid = 0
+    if (captain_pid ~ /^[0-9]+$/ && captain_pid in parent) {
+      s = comm_of[captain_pid] " " args_of[captain_pid]
+      if (s ~ /(^|[^A-Za-z0-9])(claude|codex|opencode|grok|pi)([^A-Za-z0-9]|$)/) captain_valid = 1
+    }
     for (cur = selfpid; cur != "" && cur != "0" && cur != "1"; ) {
       supervision[cur] = 1
       if (!(cur in parent)) break

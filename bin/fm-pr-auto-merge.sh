@@ -83,12 +83,13 @@ head_committed_at=$(printf '%s' "$view" | jq -r --arg head "$head" '
   exit 1
 }
 
-greptile_body=$(printf '%s' "$view" | jq -r --arg since "$head_committed_at" '
+greptile_body=$(printf '%s' "$view" | jq -r --arg since "$head_committed_at" \
+  --arg login 'greptile-apps[bot]' '
   [
     (.reviews[]? | {at:(.submittedAt // ""), body:(.body // ""), login:(.author.login // "")}),
     (.comments[]? | {at:(.createdAt // ""), body:(.body // ""), login:(.author.login // "")})
   ]
-  | map(select((.login | test("greptile"; "i")) and .at > $since))
+  | map(select(.login == $login and .at > $since))
   | sort_by(.at)
   | last
   | if . == null then "" else .body end

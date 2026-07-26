@@ -250,7 +250,10 @@ issues=$(printf '%s' "$issues" | jq --argjson tasks "$tasks" --argjson leases "$
         ($tasks | map(select(.issue_repo == $issue.repo and (.issue_number | tostring) == ($issue.number | tostring))))
         + ($leases | map(select(.owner_live and .repo == $issue.repo and (.number | tostring) == ($issue.number | tostring))))
       ) as $owners
-    | ($prs | map(select(any(.closingIssuesReferences[]?; (.number | tostring) == ($issue.number | tostring))))) as $linked_prs
+    | ($prs | map(select(
+        .repo == $issue.repo
+        and any(.closingIssuesReferences[]?; (.number | tostring) == ($issue.number | tostring))
+      ))) as $linked_prs
     | . + {
         owners:$owners,
         linked_prs:($linked_prs | map({number,title,url,headRefName,baseRefName,mergeable,statusCheckRollup})),
@@ -306,7 +309,7 @@ else
   health=action-required
 fi
 
-if [ "$active_work" -eq 1 ]; then
+if [ "$error_count" -gt 0 ] || [ "$active_work" -eq 1 ]; then
   interval=$ACTIVE_INTERVAL
 elif [ "$open_count" -gt 0 ]; then
   interval=$OPEN_IDLE_INTERVAL

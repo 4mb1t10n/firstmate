@@ -69,6 +69,20 @@ SH
   pass "checkpoint preserves watcher environment for registered custom checks"
 }
 
+test_reconcile_passes_through_and_exits_zero() {
+  local home out err status
+  home=$(make_home reconcile)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  mkdir -p "$home/state/reconcile"
+  printf '%s\n' 'reconcile: token=t-1 open=1 snapshot=/tmp/last.json' > "$home/state/reconcile/pending"
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_CHECK_INTERVAL=999999 "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
+  expect_code 0 "$status" "reconcile checkpoint exit"
+  assert_contains "$(cat "$out")" "reconcile: token=t-1" "reconcile wake was not passed through"
+  pass "checkpoint recognizes and passes through a reconciliation wake"
+}
+
 test_existing_singleton_watcher_is_not_success() {
   local home out err status
   home=$(make_home singleton)
@@ -90,4 +104,5 @@ test_existing_singleton_watcher_is_not_success() {
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
+test_reconcile_passes_through_and_exits_zero
 test_existing_singleton_watcher_is_not_success
