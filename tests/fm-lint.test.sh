@@ -15,13 +15,18 @@
 # axis was availability: the gate runs each step in a fresh environment, so a
 # commands.lint that assumed an installed ShellCheck just exited 127 on the
 # parity refusal and linted nothing. Both gates now install the pin themselves,
-# which is why the tests below drive the configured command end to end.
+# which is why the tests below drive the configured command end to end. The
+# pre-push gate goes through bin/fm-lint-gate.sh, which reuses a
+# version-and-platform-keyed ShellCheck cache instead of re-downloading every
+# push; the cache tests below prove cold install, warm offline reuse, invalid
+# entry replacement, and fail-closed behaviour when no valid cache exists.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LINT="$ROOT/bin/fm-lint.sh"
+GATE="$ROOT/bin/fm-lint-gate.sh"
 CI="$ROOT/.github/workflows/ci.yml"
 NM="$ROOT/.no-mistakes.yaml"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
@@ -72,13 +77,20 @@ test_nomistakes_invokes_the_owner() {
   local cmd
   cmd=$(nm_lint_command)
   [ -n "$cmd" ] || fail "no-mistakes commands.lint must be a single-line single-quoted command"
-  assert_contains "$cmd" "bin/fm-lint.sh" "no-mistakes commands.lint must run the one-owner script"
-  # Bootstrapping the pin is part of the configured command: the gate runs each
-  # step in a fresh environment, and fm-lint.sh refuses any other version.
-  assert_contains "$cmd" "bin/fm-install-shellcheck.sh" "no-mistakes commands.lint must install the pinned ShellCheck itself"
-  # Guard against regression to an inline re-spelling of the lint definition.
-  assert_not_contains "$cmd" "$CANON" "no-mistakes commands.lint must call fm-lint.sh, not re-spell shellcheck inline"
-  pass "no-mistakes pre-push lint bootstraps the pin and calls the one-owner script"
+  # The configured command runs the gate helper; the helper owns the bootstrap so
+  # the gate runs each step in a fresh environment where fm-lint.sh refuses any
+  # non-pinned ShellCheck.
+  assert_contains "$cmd" "bin/fm-lint-gate.sh" "no-mistakes commands.lint must run the gate lint helper"
+  [ -x "$GATE" ] || fail "bin/fm-lint-gate.sh must exist and be executable so the gate can run it directly"
+  # The gate helper hands off to the one owner and, on a cache miss, installs the
+  # pin through the checksum-verifying installer - never a bare respell of either.
+  assert_grep "bin/fm-lint.sh" "$GATE" "gate lint helper must exec the one-owner lint script"
+  assert_grep "bin/fm-install-shellcheck.sh" "$GATE" "gate lint helper must install the pin via the checksummed installer"
+  # Guard against regression to an inline re-spelling of the lint definition, in
+  # either the configured command or the helper it delegates to.
+  assert_not_contains "$cmd" "$CANON" "no-mistakes commands.lint must call the one owner, not re-spell shellcheck inline"
+  assert_no_grep "$CANON" "$GATE" "gate lint helper must call the one owner, not re-spell the shellcheck file set inline"
+  pass "no-mistakes pre-push lint delegates to the gate helper, which bootstraps the pin and calls the one owner"
 }
 
 test_pins_an_explicit_version() {
@@ -214,6 +226,32 @@ SH
   chmod +x "$fakebin/sha256sum" "$fakebin/tar" "$fakebin/sleep"
 }
 
+# write_fake_shellcheck <path> <version>: drop an executable stub ShellCheck at
+# <path> that reports <version> on `--version` and, on a lint run, prints a
+# marker and exits FM_FAKE_SHELLCHECK_EXIT (default 0). Used to pre-seed a cache
+# entry so the gate's reuse/replace decision can be driven without a network.
+write_fake_shellcheck() {
+  local path=$1 version=$2
+  mkdir -p "$(dirname "$path")"
+  cat > "$path" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: $version\n'
+  exit 0
+fi
+printf 'fm-fake-shellcheck linted %s paths\n' "\$#"
+exit "\${FM_FAKE_SHELLCHECK_EXIT:-0}"
+SH
+  chmod +x "$path"
+}
+
+# gate_cache_entry <cache-home>: the version-and-platform-keyed cache path the
+# gate helper resolves under XDG_CACHE_HOME. The platform is pinned to Linux
+# x86_64 to match fake_uname, so a test can seed or inspect the exact entry.
+gate_cache_entry() {
+  printf '%s/firstmate/shellcheck/%s-Linux-x86_64/shellcheck\n' "$1" "$REQUIRED"
+}
+
 test_installer_retries_transient_download_failure() {
   local tmp fakebin destination out
   tmp=$(fm_test_tmproot fm-shellcheck-download)
@@ -252,16 +290,17 @@ test_nomistakes_lint_bootstraps_the_pin() {
   # lint step in a fresh environment with no ShellCheck on PATH, so the pre-push
   # lint exited 127 on the parity refusal and the gate had no lint at all - the
   # same blind spot the configured command was added to close. The configured
-  # command must install the pin itself, lint under exactly that build, hand back
-  # ShellCheck's own exit status, and leave nothing behind. Driven through the
-  # real installer and the real one-owner script with a stubbed download, so it
-  # proves the whole configured command rather than any part of it in isolation.
-  local cmd tmp fakebin scratch out rc
+  # command must install the pin itself (into a version-and-platform-keyed cache),
+  # lint under exactly that build, hand back ShellCheck's own exit status, and
+  # leave no staging behind. Driven through the real gate helper, installer, and
+  # one-owner script with a stubbed download, so it proves the whole configured
+  # command rather than any part of it in isolation.
+  local cmd tmp fakebin cache store out rc
   cmd=$(nm_lint_command)
   tmp=$(fm_test_tmproot fm-lint-gate)
   fakebin=$(fm_fakebin "$tmp")
-  scratch="$tmp/tmpdir"
-  mkdir -p "$scratch"
+  cache="$tmp/cache"
+  store="$cache/firstmate/shellcheck"
 
   fake_pinned_toolchain "$fakebin"
   cat > "$fakebin/curl" <<'SH'
@@ -277,22 +316,149 @@ exit 2
 SH
   chmod +x "$fakebin/curl"
 
-  # TMPDIR is redirected into the fixture so the directory the command creates
-  # is observable: an empty scratch afterwards is the cleanup proof.
+  # First run cold-installs the pin into the redirected cache and lints under it.
   rc=0
-  out=$(cd "$ROOT" && TMPDIR="$scratch" PATH="$fakebin:$PATH" FM_FAKE_SHELLCHECK_EXIT=0 sh -c "$cmd" 2>&1) || rc=$?
+  out=$(cd "$ROOT" && XDG_CACHE_HOME="$cache" PATH="$fakebin:$PATH" FM_FAKE_SHELLCHECK_EXIT=0 sh -c "$cmd" 2>&1) || rc=$?
   expect_code 0 "$rc" "configured lint command failed with no ShellCheck on PATH"$'\n'"$out"
   assert_contains "$out" "fm-fake-shellcheck" "configured lint command did not lint with the ShellCheck it installed"
   assert_contains "$out" "(pinned $REQUIRED)" "configured lint command did not resolve the pinned ShellCheck"
-  [ -z "$(ls -A "$scratch")" ] || fail "configured lint command left its ShellCheck directory behind"
+  [ -x "$(gate_cache_entry "$cache")" ] || fail "configured lint command did not populate the version-and-platform-keyed cache"
+  [ -z "$(ls -d "$store"/.staging.* 2>/dev/null)" ] || fail "configured lint command left its staging directory behind"
 
   # A finding must reach the gate as a failure: an exit status swallowed by the
-  # bootstrap would report a passing lint that never ran clean.
+  # bootstrap would report a passing lint that never ran clean. This run reuses
+  # the now-warm cache, so it also proves propagation on the reuse path.
   rc=0
-  out=$(cd "$ROOT" && TMPDIR="$scratch" PATH="$fakebin:$PATH" FM_FAKE_SHELLCHECK_EXIT=3 sh -c "$cmd" 2>&1) || rc=$?
+  out=$(cd "$ROOT" && XDG_CACHE_HOME="$cache" PATH="$fakebin:$PATH" FM_FAKE_SHELLCHECK_EXIT=3 sh -c "$cmd" 2>&1) || rc=$?
   expect_code 3 "$rc" "configured lint command did not propagate ShellCheck's exit status"$'\n'"$out"
-  [ -z "$(ls -A "$scratch")" ] || fail "configured lint command left its ShellCheck directory behind after a finding"
-  pass "configured lint command bootstraps the pin, propagates lint status, and cleans up"
+  [ -z "$(ls -d "$store"/.staging.* 2>/dev/null)" ] || fail "configured lint command left its staging directory behind after a finding"
+  pass "configured lint command bootstraps the pin into the cache, propagates lint status, and cleans staging"
+}
+
+test_gate_cold_install() {
+  # Cold cache: the gate helper must install the checksum-verified pin, populate
+  # the version-and-platform-keyed cache entry, and lint under it.
+  local tmp fakebin cache out rc entry
+  tmp=$(fm_test_tmproot fm-lint-cache-cold)
+  fakebin=$(fm_fakebin "$tmp")
+  cache="$tmp/cache"
+  entry=$(gate_cache_entry "$cache")
+
+  fake_pinned_toolchain "$fakebin"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    : > "$2"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  chmod +x "$fakebin/curl"
+
+  [ ! -e "$entry" ] || fail "cold-install fixture started with a populated cache"
+  rc=0
+  out=$(XDG_CACHE_HOME="$cache" PATH="$fakebin:$PATH" FM_FAKE_SHELLCHECK_EXIT=0 "$GATE" 2>&1) || rc=$?
+  expect_code 0 "$rc" "gate helper failed to cold-install the pin"$'\n'"$out"
+  [ -x "$entry" ] || fail "gate helper did not populate the keyed cache entry on a cold cache"
+  [ "$("$entry" --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ] \
+    || fail "gate helper cached a ShellCheck other than the pin"
+  assert_contains "$out" "fm-fake-shellcheck" "gate helper did not lint with the freshly cached ShellCheck"
+  pass "gate helper cold-installs the pin into the keyed cache and lints under it"
+}
+
+test_gate_warm_offline_reuse() {
+  # A valid cache entry must be reused with no network: an offline run (curl only
+  # records its call and fails) still lints, and the installer is never invoked.
+  local tmp fakebin cache out rc entry called
+  tmp=$(fm_test_tmproot fm-lint-cache-warm)
+  fakebin=$(fm_fakebin "$tmp")
+  cache="$tmp/cache"
+  entry=$(gate_cache_entry "$cache")
+  called="$tmp/curl-called"
+
+  fake_uname "$fakebin" Linux x86_64
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf 'called\n' >> "$CURL_CALLED"
+exit 22
+SH
+  chmod +x "$fakebin/curl"
+
+  write_fake_shellcheck "$entry" "$REQUIRED"
+
+  rc=0
+  out=$(CURL_CALLED="$called" XDG_CACHE_HOME="$cache" PATH="$fakebin:$PATH" FM_FAKE_SHELLCHECK_EXIT=0 "$GATE" 2>&1) || rc=$?
+  expect_code 0 "$rc" "gate helper failed to reuse a valid cache entry offline"$'\n'"$out"
+  [ ! -f "$called" ] || fail "gate helper hit the network despite a valid cache entry"
+  assert_contains "$out" "fm-fake-shellcheck" "gate helper did not lint with the cached ShellCheck"
+  pass "gate helper reuses a valid cache entry offline without re-downloading"
+}
+
+test_gate_invalid_entry_replaced() {
+  # A cache entry reporting the wrong version must be treated as invalid and
+  # atomically replaced with a fresh checksum-verified install of the pin.
+  local tmp fakebin cache out rc entry
+  tmp=$(fm_test_tmproot fm-lint-cache-invalid)
+  fakebin=$(fm_fakebin "$tmp")
+  cache="$tmp/cache"
+  entry=$(gate_cache_entry "$cache")
+
+  fake_pinned_toolchain "$fakebin"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    : > "$2"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  chmod +x "$fakebin/curl"
+
+  write_fake_shellcheck "$entry" 0.9.9
+  [ "$("$entry" --version | awk '/^version:/ {print $2; exit}')" = "0.9.9" ] \
+    || fail "invalid-entry fixture did not seed a stale ShellCheck"
+
+  rc=0
+  out=$(XDG_CACHE_HOME="$cache" PATH="$fakebin:$PATH" FM_FAKE_SHELLCHECK_EXIT=0 "$GATE" 2>&1) || rc=$?
+  expect_code 0 "$rc" "gate helper failed to replace an invalid cache entry"$'\n'"$out"
+  [ "$("$entry" --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ] \
+    || fail "gate helper did not replace the stale cache entry with the pin"
+  assert_contains "$out" "fm-fake-shellcheck" "gate helper did not lint after replacing the stale entry"
+  pass "gate helper replaces an invalid cache entry with the pinned ShellCheck"
+}
+
+test_gate_fails_closed_offline_cold() {
+  # The binding fail-closed guarantee: with no valid cache and no network, the
+  # gate must exit non-zero and never lint. A skipped lint reported as a pass is
+  # exactly the blind spot this whole mechanism exists to remove.
+  local tmp fakebin cache store out rc entry
+  tmp=$(fm_test_tmproot fm-lint-cache-failclosed)
+  fakebin=$(fm_fakebin "$tmp")
+  cache="$tmp/cache"
+  store="$cache/firstmate/shellcheck"
+  entry=$(gate_cache_entry "$cache")
+
+  fake_pinned_toolchain "$fakebin"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+exit 22
+SH
+  chmod +x "$fakebin/curl"
+
+  [ ! -e "$entry" ] || fail "fail-closed fixture started with a populated cache"
+  rc=0
+  out=$(XDG_CACHE_HOME="$cache" PATH="$fakebin:$PATH" FM_FAKE_SHELLCHECK_EXIT=0 "$GATE" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "gate helper passed with no valid cache and no network"$'\n'"$out"
+  assert_not_contains "$out" "fm-fake-shellcheck" "gate helper linted despite failing to obtain the pinned ShellCheck"
+  [ ! -e "$entry" ] || fail "gate helper left a cache entry behind after a failed install"
+  [ -z "$(ls -d "$store"/.staging.* 2>/dev/null)" ] || fail "gate helper left staging behind after a failed install"
+  pass "gate helper fails closed when no valid cache exists and the pin cannot be installed"
 }
 
 test_rejects_wrong_shellcheck_version() {
@@ -404,6 +570,10 @@ test_ci_installs_and_logs_the_pinned_version
 test_installer_pins_a_build_for_every_supported_platform
 test_installer_retries_transient_download_failure
 test_nomistakes_lint_bootstraps_the_pin
+test_gate_cold_install
+test_gate_warm_offline_reuse
+test_gate_invalid_entry_replaced
+test_gate_fails_closed_offline_cold
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts

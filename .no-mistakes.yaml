@@ -14,17 +14,19 @@ disable_project_settings: true
 # lint step never ran the deterministic
 # `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` that CI runs, so info-level
 # ShellCheck findings (e.g. SC2015) were not surfaced locally before CI rejected
-# them. commands.lint delegates to bin/fm-lint.sh, the single owner of the lint
-# definition that .github/workflows/ci.yml also invokes, so local can never
-# diverge from CI again (parity asserted by tests/fm-lint.test.sh).
+# them. commands.lint delegates to bin/fm-lint-gate.sh, which execs bin/fm-lint.sh
+# - the single owner of the lint definition that .github/workflows/ci.yml also
+# invokes - so local can never diverge from CI again (parity asserted by
+# tests/fm-lint.test.sh).
 #
-# It first bootstraps the pin the same way CI does, because bin/fm-lint.sh
-# refuses any ShellCheck other than the pinned version and the gate runs each
-# step in a fresh environment with nothing on PATH. Plain `bin/fm-lint.sh` there
-# exited 127 and the gate had no lint at all, so the command installs the
-# repository-pinned, checksum-verified host build into a throwaway directory,
-# puts only that directory ahead of PATH, and removes it on exit. Nothing
-# outside this command has to be pre-installed, and no state survives the run.
+# fm-lint-gate.sh bootstraps the pin because bin/fm-lint.sh refuses any ShellCheck
+# other than the pinned version and the gate runs each step in a fresh environment
+# with nothing on PATH; plain `bin/fm-lint.sh` there exited 127 and the gate had
+# no lint at all. Rather than re-download every push, it reuses a
+# version-and-platform-keyed user cache and only installs (checksum-verified, via
+# bin/fm-install-shellcheck.sh) on a cache miss or an invalid entry; a valid cache
+# lints offline, and a cold cache with no network fails closed instead of skipping
+# lint. Nothing outside this command has to be pre-installed.
 #
 # Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
 # Test is intent-targeted validation of whether the change meets its brief;
@@ -32,7 +34,7 @@ disable_project_settings: true
 # security, Herdr, tmux, and lifecycle coverage). A full-suite override here
 # would duplicate CI and defeat the targeted Test contract.
 commands:
-  lint: 'set -eu; d=$(mktemp -d "${TMPDIR:-/tmp}/fm-lint.XXXXXX"); trap ''rm -rf "$d"'' EXIT; bin/fm-install-shellcheck.sh "$d" >&2; PATH="$d:$PATH" bin/fm-lint.sh'
+  lint: 'bin/fm-lint-gate.sh'
 
 # Keep test evidence out of this repo; it stays in a temp dir instead.
 test:

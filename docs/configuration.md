@@ -106,8 +106,8 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
-Because the gate runs each step in a fresh environment, that command first installs the pinned ShellCheck with `bin/fm-install-shellcheck.sh` into a throwaway directory it puts ahead of `PATH` and removes on exit, exactly as the CI lint job does; nothing has to be installed on the host.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and points `commands.lint` at `bin/fm-lint-gate.sh`, which execs `bin/fm-lint.sh` so local lint matches CI.
+Because the gate runs each step in a fresh environment with no ShellCheck on `PATH`, the gate helper bootstraps the pin itself, but instead of re-downloading on every push it reuses a version-and-platform-keyed user cache and only installs (checksum-verified, via `bin/fm-install-shellcheck.sh`) on a cache miss or an invalid entry; a valid cache lints offline, while a cold cache with no network fails closed rather than skipping lint.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
 It does not set `commands.test` to a complete `tests/*.test.sh` walk.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
