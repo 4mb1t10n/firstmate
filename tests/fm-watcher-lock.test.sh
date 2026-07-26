@@ -857,6 +857,34 @@ SH
   pass "cycle-exit ledger links a verified successor and remains size-capped"
 }
 
+test_arm_blesses_a_reconciliation_wake() {
+  local dir state fakebin armout rc token latch
+  dir=$(make_case arm-reconcile)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  token='1784894400-42'
+  latch="reconcile: token=$token open=1 available=1 in-progress=0 orphaned=0 prs=0 snapshot=$state/reconcile/last.json"
+  mark_pr_check_migration_complete "$state"
+  mkdir -p "$state/reconcile"
+  printf '%s\n' "$latch" > "$state/reconcile/pending"
+  rc=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" || rc=$?
+  # A reconciliation wake is a blessed watcher exit like signal/stale/check: the
+  # arm must propagate it and return zero, not treat it as an unexplained exit
+  # and try to restart the watcher.
+  [ "$rc" -eq 0 ] || fail "arm returned non-zero for a reconciliation wake (status $rc): $(cat "$armout")"
+  grep -qF "reconcile: token=$token" "$armout" \
+    || fail "arm did not propagate the reconciliation wake"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "arm printed FAILED after a valid reconciliation wake"
+  grep -q "reason=actionable-reconcile" "$state/.watch-cycle-exits.log" \
+    || fail "reconciliation wake was not classified as actionable in the lifecycle ledger"
+  # Only fm-reconcile-ack.sh retires the latch, so re-arming must find it intact.
+  [ -s "$state/reconcile/pending" ] \
+    || fail "arm consumed the acknowledgement latch instead of leaving it for the ack"
+  pass "arm blesses a reconciliation wake as an actionable exit and leaves the latch for acknowledgement"
+}
+
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   local dir state fakebin armout armpid watcher_pid i status
   dir=$(make_case stopped-watcher)
@@ -982,4 +1010,5 @@ test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
+test_arm_blesses_a_reconciliation_wake
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

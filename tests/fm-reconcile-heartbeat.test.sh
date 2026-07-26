@@ -324,6 +324,164 @@ jq -e '.counts.orphaned_leases == 0 and .counts.orphaned == 0' "$OUT_C2" >/dev/n
   || fail "a live-owner lease was still counted as orphaned"
 pass "issue leases are cross-checked against live task ids, not trusted alone"
 
+# --- every configured repository, and repository-scoped linked PRs ----------
+# Issue numbers are per-repository, so #7 in one repo and #7 in another are
+# unrelated work. A single-repo fixture cannot tell a repo-scoped linked-PR
+# lookup from an unscoped one, so this fleet configures two repositories: the
+# second one's PR closes ITS OWN #7, and must never vouch for the first one's
+# abandoned in-progress #7.
+HOME_F="$TMP/home-f"
+FAKEBIN_F="$TMP/bin-f"
+mkdir -p "$HOME_F/state" "$HOME_F/data" "$HOME_F/projects/app" "$HOME_F/projects/tools" "$FAKEBIN_F"
+cat > "$HOME_F/data/projects.md" <<'EOF'
+- app [no-mistakes +yolo] - Test application (added 2026-07-24)
+- tools [no-mistakes] - Test tooling (added 2026-07-24)
+EOF
+git -C "$HOME_F/projects/app" init -q
+git -C "$HOME_F/projects/app" remote add origin https://github.com/acme/app.git
+git -C "$HOME_F/projects/tools" init -q
+git -C "$HOME_F/projects/tools" remote add origin https://github.com/acme/tools.git
+cat > "$FAKEBIN_F/gh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+case "$*" in
+  *"--repo acme/app"*"issue list"*|*"issue list --repo acme/app"*)
+    printf '%s\n' '[{"number":7,"title":"Abandoned by a dead crew","url":"https://github.com/acme/app/issues/7","labels":[{"name":"in-progress"}],"createdAt":"2026-07-20T00:00:00Z","updatedAt":"2026-07-20T00:00:00Z"}]'
+    ;;
+  *"issue list --repo acme/tools"*)
+    printf '%s\n' '[{"number":9,"title":"Unclaimed tooling work","url":"https://github.com/acme/tools/issues/9","labels":[],"createdAt":"2026-07-21T00:00:00Z","updatedAt":"2026-07-21T00:00:00Z"}]'
+    ;;
+  *"pr list --repo acme/app"*)
+    printf '[]\n'
+    ;;
+  *"pr list --repo acme/tools"*)
+    printf '%s\n' '[{"number":21,"title":"Close tools#7","url":"https://github.com/acme/tools/pull/21","headRefName":"feature","baseRefName":"stg","mergeable":"MERGEABLE","statusCheckRollup":[],"closingIssuesReferences":[{"number":7}]}]'
+    ;;
+  *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$FAKEBIN_F/gh"
+
+OUT_F="$TMP/out-f.json"
+PATH="$FAKEBIN_F:$PATH" \
+  FM_HOME="$HOME_F" \
+  FM_RECONCILE_NOW="2026-07-24T12:00:00Z" \
+  FM_RECONCILE_NOW_EPOCH=1784894400 \
+  FM_PROCESS_OLD_SECS=999999999 \
+  "$ROOT/bin/fm-reconcile.sh" --tick --json > "$OUT_F"
+
+jq -e '[.repositories[].repo] | sort == ["acme/app","acme/tools"]' "$OUT_F" >/dev/null \
+  || fail "not every configured project repository was inventoried"
+jq -e '.counts.open == 2
+  and ([.issues[] | select(.repo == "acme/app" and .number == 7)] | length) == 1
+  and ([.issues[] | select(.repo == "acme/tools" and .number == 9)] | length) == 1' "$OUT_F" >/dev/null \
+  || fail "open issues from every configured repository were not authorized as work"
+jq -e '[.issues[] | select(.repo == "acme/app" and .number == 7)][0]
+  | .linked_prs == [] and .orphaned == true' "$OUT_F" >/dev/null \
+  || fail "a PR in a different repository closing its own #7 vouched for an abandoned in-progress issue"
+jq -e '[.issues[] | select(.repo == "acme/tools" and .number == 9)][0]
+  | .linked_prs == []' "$OUT_F" >/dev/null \
+  || fail "an unrelated PR was linked to an issue it does not close"
+jq -e '[.issues[] | select(.repo == "acme/tools")][0] as $t
+  | ([.prs[] | select(.repo == "acme/tools" and .number == 21)] | length) == 1' "$OUT_F" >/dev/null \
+  || fail "the second repository's open PR was not inventoried"
+jq -e '.counts.orphaned == 1' "$OUT_F" >/dev/null \
+  || fail "the abandoned in-progress issue was not reported as an orphan to repair"
+pass "every configured repository's open issues are authorized, and linked PR ownership is repository-scoped"
+
+# --- degraded GitHub sync holds the active cadence and demands an ack -------
+# A failed inventory is not evidence of a quiet fleet: it is evidence of nothing
+# at all. Backing off to a slow cadence there would let real work sit unseen for
+# up to two hours, so an error must pin the fast cadence and still require an
+# acknowledgement.
+HOME_G="$TMP/home-g"
+FAKEBIN_G="$TMP/bin-g"
+mkdir -p "$HOME_G/state" "$HOME_G/data" "$HOME_G/projects/app" "$FAKEBIN_G"
+cat > "$HOME_G/data/projects.md" <<'EOF'
+- app [no-mistakes +yolo] - Test application (added 2026-07-24)
+EOF
+git -C "$HOME_G/projects/app" init -q
+git -C "$HOME_G/projects/app" remote add origin https://github.com/acme/app.git
+cat > "$FAKEBIN_G/gh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+case "$1 $2" in
+  "issue list") printf 'gh: connection reset by peer\n' >&2; exit 1 ;;
+  "pr list") printf '[]\n' ;;
+  *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$FAKEBIN_G/gh"
+
+OUT_G="$TMP/out-g.json"
+PATH="$FAKEBIN_G:$PATH" \
+  FM_HOME="$HOME_G" \
+  FM_RECONCILE_NOW="2026-07-24T12:00:00Z" \
+  FM_RECONCILE_NOW_EPOCH=1784894400 \
+  FM_PROCESS_OLD_SECS=999999999 \
+  "$ROOT/bin/fm-reconcile.sh" --tick --json > "$OUT_G"
+
+jq -e '.health.state == "degraded-sync"' "$OUT_G" >/dev/null \
+  || fail "a failed GitHub inventory was not reported as degraded-sync"
+jq -e '[.errors[].error] | index("open issue inventory failed") != null' "$OUT_G" >/dev/null \
+  || fail "the failed open issue inventory was not recorded as an error"
+jq -e '.counts.open == 0 and .counts.open_prs == 0 and .counts.active_crews == 0' "$OUT_G" >/dev/null \
+  || fail "the degraded fixture unexpectedly inventoried work, so the cadence check proves nothing"
+jq -e '.next_interval_seconds == 600' "$OUT_G" >/dev/null \
+  || fail "degraded GitHub synchronization backed off instead of holding the 10-minute cadence"
+jq -e '.next_due_epoch == 1784895000' "$OUT_G" >/dev/null \
+  || fail "degraded GitHub synchronization did not schedule the next tick 600s out"
+jq -e '.ack.required == true and .ack.token != null' "$OUT_G" >/dev/null \
+  || fail "degraded GitHub synchronization did not demand an acknowledgement"
+[ -s "$HOME_G/state/reconcile/pending" ] \
+  || fail "degraded GitHub synchronization did not latch a reconciliation wake"
+pass "degraded GitHub synchronization holds the active cadence and demands an acknowledgement"
+
+# --- an acknowledgement clears only its own pending token -------------------
+# The latch and issued.json are written by separate atomic moves, so a crash or
+# an interleaving between them can leave a latch that is newer than the token
+# being acknowledged. That state is built directly here because the reconcile
+# lock makes it unreachable through concurrent calls; the guard is defense in
+# depth, and an ack must never silently retire a reconciliation it never saw.
+HOME_H="$TMP/home-h"
+mkdir -p "$HOME_H/state/reconcile"
+ACK_H() {  # <token>
+  FM_HOME="$HOME_H" "$ROOT/bin/fm-reconcile-ack.sh" "$1" "inventory accepted"
+}
+NEWER_LATCH='reconcile: token=1784896000-99 open=1 available=1 in-progress=0 orphaned=0 prs=0 snapshot=/dev/null'
+printf '{"token":"1784894400-42","generated":"2026-07-24T12:00:00Z","epoch":1784894400}\n' \
+  > "$HOME_H/state/reconcile/issued.json"
+printf '%s\n' "$NEWER_LATCH" > "$HOME_H/state/reconcile/pending"
+
+ACK_H 1784894400-42 >/dev/null \
+  || fail "acknowledging the issued token failed"
+jq -e '.token == "1784894400-42"' "$HOME_H/state/reconcile/last-ack.json" >/dev/null \
+  || fail "the acknowledgement of the issued token was not persisted"
+[ -s "$HOME_H/state/reconcile/pending" ] \
+  || fail "an acknowledgement cleared a pending latch carrying a newer token"
+grep -Fq 'token=1784896000-99' "$HOME_H/state/reconcile/pending" \
+  || fail "the newer pending latch was rewritten instead of preserved"
+
+# The guard must not become "never clears": the matching token still retires it.
+printf '{"token":"1784896000-99","generated":"2026-07-24T12:26:40Z","epoch":1784896000}\n' \
+  > "$HOME_H/state/reconcile/issued.json"
+ACK_H 1784896000-99 >/dev/null \
+  || fail "acknowledging the latched token failed"
+[ ! -e "$HOME_H/state/reconcile/pending" ] \
+  || fail "an acknowledgement of the latched token did not clear the wake latch"
+
+# A stale token is refused outright and leaves both the latch and the accepted
+# acknowledgement untouched.
+printf '%s\n' "$NEWER_LATCH" > "$HOME_H/state/reconcile/pending"
+if ACK_H 1784894400-42 >/dev/null 2>&1; then
+  fail "a stale token was accepted as an acknowledgement"
+fi
+[ -s "$HOME_H/state/reconcile/pending" ] \
+  || fail "a refused acknowledgement still cleared the pending latch"
+jq -e '.token == "1784896000-99"' "$HOME_H/state/reconcile/last-ack.json" >/dev/null \
+  || fail "a refused acknowledgement overwrote the accepted one"
+pass "an acknowledgement clears only a latch carrying its own token"
+
 # --- heavyweight process ownership -----------------------------------------
 # ps and uname are shadowed for these invocations only: BSD ps has no elapsed
 # seconds column, so the old-unowned path is only reachable through a simulated

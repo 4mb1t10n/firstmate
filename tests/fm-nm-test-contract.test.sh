@@ -22,12 +22,25 @@ test_nm_yaml_tracked() {
 }
 
 test_nm_keeps_lint_pin() {
-  # The pin is "the lint step runs the one owner", not one literal spelling:
-  # commands.lint also bootstraps the pinned ShellCheck the owner requires,
-  # because the gate runs each step in a fresh environment. What must never
-  # regress is the delegation - tests/fm-lint.test.sh owns the rest.
-  grep -Eq "^  lint: '.*bin/fm-lint\.sh'\$" "$NM" \
-    || fail "commands.lint must still run bin/fm-lint.sh as its lint step"
+  # The pin is "the lint step reaches the one owner", not one literal spelling:
+  # commands.lint also has to bootstrap the pinned ShellCheck the owner requires,
+  # because the gate runs each step in a fresh environment, and that bootstrap now
+  # lives in a tracked repo helper instead of an inline command string. So follow
+  # the delegation one hop into the helper rather than matching the configured
+  # command itself - tests/fm-lint.test.sh owns the rest of the helper's contract.
+  local cmd helper
+  cmd=$(sed -n "s/^  lint: '\(.*\)'\$/\1/p" "$NM" | sed "s/''/'/g")
+  [ -n "$cmd" ] || fail "commands.lint must be a single-line single-quoted command"
+  case "$cmd" in
+    *bin/fm-lint.sh*) : ;;
+    *bin/fm-lint-gate.sh*)
+      helper="$ROOT/bin/fm-lint-gate.sh"
+      assert_present "$helper" "commands.lint delegates to a missing bin/fm-lint-gate.sh"
+      assert_grep "bin/fm-lint.sh" "$helper" \
+        "commands.lint's helper must still run bin/fm-lint.sh as its lint step"
+      ;;
+    *) fail "commands.lint must still run bin/fm-lint.sh as its lint step; got: $cmd" ;;
+  esac
   pass "commands.lint stays pinned to bin/fm-lint.sh"
 }
 
