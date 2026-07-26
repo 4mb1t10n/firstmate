@@ -30,11 +30,13 @@ The agent-only `reconciliation-heartbeat` skill owns the reasoning procedure Fir
 
 The next interval is:
 
-- 10 minutes when an issue lease, crew, validation run, or open PR is active, including when every issue is already closed.
+- 10 minutes when an issue lease, crew, validation run, or open PR is active, including when every issue is already closed, and whenever the tick itself was degraded.
 - 30 minutes when open issues exist but no work is active.
 - 2 hours only when there is neither open nor active work.
 
 Active work, not the open issue count, selects the fast cadence and requires an acknowledgement: closing the last issue does not end supervision of a crew, a lease, or an open PR.
+
+A degraded tick holds that same fast cadence and also requires an acknowledgement, so a forge or process-inventory failure retries in minutes instead of hiding behind an idle interval.
 
 A validation record counts as active work only while its task still exists, because the record itself is durable evidence that is never cleaned.
 
@@ -88,7 +90,7 @@ An inspect still reports an outstanding token so it can be acknowledged, and rep
 
 ## Failure behavior
 
-GitHub inventory failure is `degraded-sync`.
+A failed inventory, whether of GitHub or of process ownership, is `degraded-sync`.
 
 An acknowledgement request older than the configured grace period is `control-plane-failed`.
 
@@ -96,9 +98,9 @@ An open issue inventory is `action-required` until First Mate accounts for the w
 
 All merge checks are fail-closed.
 
-The Greptile gate reads only the latest Greptile review or comment posted after the current head commit, and that review must carry its own score field reading exactly 5/5.
+The Greptile gate reads only the latest review or comment posted after the current head commit by the exact login `greptile-apps[bot]`, and that review must carry its own score field reading exactly 5/5.
 
-A score from an earlier revision, a score from a Greptile lookalike author, a superseded score, and prose that merely contains `5/5` all refuse the merge.
+A score from an earlier revision, a score from any other author, a superseded score, and prose that merely contains `5/5` all refuse the merge.
 
 The automatic merge command never edits code or tests and never relaxes a CI condition.
 
@@ -111,6 +113,8 @@ A process whose chain resolves to exactly one task worktree is `owned`.
 A process whose chain matches several worktrees is `ambiguous`.
 
 The captain pane, the reconciliation's own ancestry, and the supervision plane are `protected`.
+
+The captain pane comes from the session-lock PID in `state/.lock`, honored only while that PID is live and still looks like a primary harness, so anything descended from it stays protected even when the tick is fired by the external scheduler rather than from inside the captain's own process tree.
 
 Only a process proven to belong to nobody is `unowned`, and only an old `unowned` process is offered as a cleanup candidate.
 
