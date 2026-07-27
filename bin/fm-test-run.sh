@@ -679,7 +679,11 @@ families_for_changed_path() {
       # lane's contract coverage re-runs.
       printf '%s\n' real-herdr-gated
       ;;
-    bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\
+    # bin/fm-lint-gate.sh is mapped after its removal (its ShellCheck bootstrap
+    # moved into bin/fm-lint.sh): a deleted path still appears in the changed set,
+    # so it has to resolve to the family that owns the lint contract rather than
+    # die as unmapped.
+    bin/fm-lint.sh|bin/fm-lint-gate.sh|bin/fm-install-shellcheck.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
     bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
