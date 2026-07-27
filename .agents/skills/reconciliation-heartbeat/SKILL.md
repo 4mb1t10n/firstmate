@@ -1,6 +1,6 @@
 ---
 name: reconciliation-heartbeat
-description: Agent-only procedure for handling a reconcile wake, maintaining GitHub issue leases, advancing every authorized issue, cleaning completed crews, and applying the strict automatic merge gate.
+description: Agent-only procedure for handling a reconcile wake, maintaining GitHub issue leases, advancing every authorized issue, cleaning completed crews, and reporting strict merge-gate status for the captain's merge decision.
 user-invocable: false
 metadata:
   internal: true
@@ -81,7 +81,15 @@ When Cypress fails:
 
 Never skip tests, remove meaningful assertions, weaken selectors, inflate retries or timeouts to hide deterministic defects, replace end-to-end coverage with weaker coverage, or update expected output without validating the new behavior.
 
-## Automatic merge
+## Merge gate
+
+First Mate never merges.
+
+Never approve a PR, never enable auto-merge on it, and never merge it.
+
+Every merge is the captain's own decision and the captain's own action, on every path, with no exception.
+
+`bin/fm-pr-auto-merge.sh` still ends by landing the PR, so do not invoke it until that trailing merge call is removed.
 
 After No Mistakes reports successful validation for the final PR head, record that exact head:
 
@@ -89,13 +97,9 @@ After No Mistakes reports successful validation for the final PR head, record th
 bin/fm-validation-record.sh <task-id> <head-sha> [run-id]
 ```
 
-Then use:
+Then evaluate the merge gate yourself through `gh-axi`, reading the PR's base branch, mergeability, and check rollup and the latest Greptile review posted after the current head commit, and report its status to the captain.
 
-```sh
-bin/fm-pr-auto-merge.sh <task-id> <pr-url>
-```
-
-The gate refuses unless:
+The PR is merge-ready only when all of these hold:
 
 - The PR targets `stg`.
 - The PR is conflict-free.
@@ -105,9 +109,15 @@ The gate refuses unless:
 - Cypress is present and passing.
 - Every reported CI check is green.
 
-Missing Greptile, Migration Drift, or Cypress prohibits automatic merge.
+Report fail-closed.
 
-After merge, verify issue closure, release the lease, teardown the crew, clean its resources, and reevaluate capacity.
+Any condition that is absent, pending, failing, or unverifiable is reported as not merge-ready, naming which one it was.
+
+Missing Greptile, Migration Drift, or Cypress is a not-merge-ready report, never an assumed pass.
+
+An acknowledgeable merge-gated issue is one whose status was evaluated and reported, not one that was merged.
+
+After the captain merges, verify issue closure, release the lease, teardown the crew, clean its resources, and reevaluate capacity.
 
 ## Blocking and acknowledgement
 

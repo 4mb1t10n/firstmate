@@ -113,18 +113,15 @@ if printf '%s\n' "$score_fields" | grep -Eqv '[^0-9]5[[:space:]]*/[[:space:]]*5$
   exit 1
 fi
 
-# Every task PR merge lands through bin/fm-pr-merge.sh (AGENTS.md section 7),
-# which records the canonical pr= and the forge's pr_head= before merging so
-# bin/fm-teardown.sh can still verify landed work after the squash. Calling
-# gh-axi directly here merged around that recording and left an auto-merged task
-# with no PR reference to verify against.
+# PENDING REMOVAL. First Mate never merges: AGENTS.md hard rule 2 admits no
+# exception, so no gate result authorizes this call. Until it is removed this
+# script must not be invoked; the gate above is still correct and is what an
+# evaluate-and-report path should reuse (docs/reconciliation-heartbeat.md).
 #
-# This delegation is the whole authority for the call and it is deliberately
-# narrow: it is reached only on the one gated-stg path above, after this gate has
-# already proven stg base, conflict-free mergeability, exact-head No Mistakes
-# evidence, an exactly-5/5 post-head Greptile score, present and passing
-# Migration Drift and Cypress, and every reported check green. It grants no
-# standing automatic merge to any other caller and changes nothing about the
-# routine paths, where the captain's explicit word or `yolo` remains the only
-# authority to merge (AGENTS.md section 7).
+# Rationale to preserve for whoever removes it: every task PR merge lands through
+# bin/fm-pr-merge.sh (AGENTS.md section 7), which records the canonical pr= and
+# the forge's pr_head= before merging so bin/fm-teardown.sh can still verify
+# landed work after the squash. Calling gh-axi directly here merged around that
+# recording and left a merged task with no PR reference to verify against, so any
+# future merge path must keep that recording rather than drop back to gh-axi.
 "$SCRIPT_DIR/fm-pr-merge.sh" "$TASK" "$FM_PR_URL" -- --squash --delete-branch

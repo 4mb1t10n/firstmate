@@ -194,7 +194,7 @@ Firstmate's skills live in two separate places with different audiences:
 
 - [docs/architecture.md](docs/architecture.md) - how the crew, supervision, worktrees, secondmates, and project modes work.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional X mode, the files you set, and harness support.
-- [docs/reconciliation-heartbeat.md](docs/reconciliation-heartbeat.md) - the periodic GitHub-to-fleet control loop: cadence selection, issue leases, durable acknowledgement, process ownership, and the automatic feature-to-`stg` merge gate.
+- [docs/reconciliation-heartbeat.md](docs/reconciliation-heartbeat.md) - the periodic GitHub-to-fleet control loop: cadence selection, issue leases, durable acknowledgement, process ownership, and the feature-to-`stg` merge gate.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - setup guide for the tmux reference backend: prerequisites, attaching, and watching crew windows.
 - [docs/herdr-backend.md](docs/herdr-backend.md) - setup guide for the experimental herdr backend, plus its verification notes and known gaps.

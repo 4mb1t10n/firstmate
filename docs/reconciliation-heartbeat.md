@@ -18,11 +18,11 @@ Every open issue in every configured project repository is authorized work.
 
 `bin/fm-validation-record.sh` records complete No Mistakes validation for one exact PR head commit.
 
-`bin/fm-pr-auto-merge.sh` owns the strict automatic feature-to-`stg` merge gate.
+`bin/fm-pr-auto-merge.sh` owns the strict feature-to-`stg` merge gate.
 
-It performs no merge of its own: once every gate passes it lands the PR through `bin/fm-pr-merge.sh`, so the canonical `pr=` and the forge's exact `pr_head=` are recorded before the squash and teardown can still verify the landed work.
-
-That delegation is the whole authority for the call and reaches only the gated feature-to-`stg` path; every other merge still needs the captain's explicit word or `yolo`.
+First Mate evaluates that gate and reports its status; it never approves a PR, never enables auto-merge, and never merges.
+Every merge is the captain's decision and the captain's action, on every path.
+The script still ends by landing the PR, so it must not be invoked until that call is removed.
 
 The agent-only `reconciliation-heartbeat` skill owns the reasoning procedure First Mate follows after the deterministic service wakes it.
 
@@ -102,7 +102,9 @@ The Greptile gate reads only the latest review or comment posted after the curre
 
 A score from an earlier revision, a score from any other author, a superseded score, and prose that merely contains `5/5` all refuse the merge.
 
-The automatic merge command never edits code or tests and never relaxes a CI condition.
+The merge-gate command never edits code or tests and never relaxes a CI condition.
+
+Any gate condition that is absent, pending, failing, or unverifiable is reported as not merge-ready.
 
 ## Process ownership
 
