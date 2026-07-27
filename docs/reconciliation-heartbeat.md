@@ -21,8 +21,10 @@ Every open issue in every configured project repository is authorized work.
 `bin/fm-pr-merge-readiness.sh` owns the strict feature-to-`stg` merge-readiness report.
 
 It assesses the gate and reports the result; it never approves a PR, never enables auto-merge, and never merges.
-Every merge is the captain's decision and the captain's action, on every path.
+Every merge is the captain's decision and the captain's action, on every path, with no `yolo` or other standing exception (AGENTS.md hard rule 2).
 A merge-ready report is an input to that decision, never authority to act on it.
+
+`tests/fm-reconcile-policy.test.sh` pins that contract: a PR that satisfies every gate must still report merge-ready without invoking any merge, approval, or auto-merge command.
 
 The agent-only `reconciliation-heartbeat` skill owns the reasoning procedure First Mate follows after the deterministic service wakes it.
 

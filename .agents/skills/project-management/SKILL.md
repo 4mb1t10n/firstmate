@@ -34,8 +34,9 @@ Choose the delivery mode when adding or creating the project:
 - `direct-PR` pushes and opens a PR without the no-mistakes pipeline.
 - `local-only` has no required remote or PR and lands only through the approved local fast-forward path.
 
-The optional `+yolo` posture changes routine approval authority but does not change the delivery mode.
+The optional `+yolo` posture changes routine non-merge approval authority but does not change the delivery mode.
 Default it off, and enable it only on the captain's explicit instruction.
+It never grants merge authority: every PR merge and every local-only merge approval stays the captain's own decision on every path (AGENTS.md hard rule 2).
 Destructive, irreversible, and security-sensitive decisions still require captain approval when it is on.
 
 ## Add or clone an existing project
