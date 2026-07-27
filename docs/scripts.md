@@ -65,7 +65,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-issue-lease.sh`      | Reserve or release an issue through the exact `in-progress` label and durable local ownership evidence |
 | `fm-process-inventory.sh` | Report heavyweight child processes, parent-chain task ownership, and old unowned cleanup candidates; ambiguous, captain, and supervision processes are never candidates |
 | `fm-validation-record.sh` | Bind completed No Mistakes evidence to one task and exact PR head                    |
-| `fm-pr-auto-merge.sh`    | Enforce the complete feature-to-stg merge gate; its trailing merge call is pending removal, so it must not be invoked (docs/reconciliation-heartbeat.md) |
+| `fm-pr-merge-readiness.sh` | Report fail-closed whether one PR meets every feature-to-stg merge condition; it never approves and never merges |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
 | `fm-afk-launch.sh`       | Own away-mode entry, exit, rollback, and any backend terminal lifecycle                 |
 | `fm-afk-return.sh`       | Own deterministic return shutdown, catch-up evidence, and the firstmate-actionable blocker gate |

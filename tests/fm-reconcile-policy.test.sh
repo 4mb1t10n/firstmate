@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Issue-lease and automatic-merge fail-closed policy tests.
+# Issue-lease and merge-readiness fail-closed policy tests.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,14 +26,7 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "$1 $2" in
   "label create") exit 0 ;;
   "issue edit") exit 0 ;;
-  "pr view")
-    # fm-pr-check.sh, reached through fm-pr-merge.sh, asks only for the head
-    # commit; the auto-merge gate asks for the whole PR view.
-    case " $* " in
-      *" --json headRefOid "*) printf '%s\n' "$FM_TEST_PR_HEAD" ;;
-      *) cat "$FM_TEST_PR_VIEW" ;;
-    esac
-    ;;
+  "pr view") cat "$FM_TEST_PR_VIEW" ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 2 ;;
 esac
 EOF
@@ -90,9 +83,9 @@ pass "in-progress is an exclusive durable issue lease"
 HEAD_SHA=abcdef1234567890abcdef1234567890abcdef12
 FM_HOME="$HOME_DIR" "$ROOT/bin/fm-validation-record.sh" task-7 "$HEAD_SHA" run-1 >/dev/null
 
-# The automatic merge lands through bin/fm-pr-merge.sh, which records the task's
-# PR metadata before merging, so the task needs the same real meta any PR task
-# has and a worktree the pr_head lookup can run in.
+# The readiness report is the whole product. The task carries the same real meta
+# any PR task has, so the assertions below can prove the report never records
+# the pr=/pr_head= metadata that only a merge path writes.
 WORKTREE="$TMP/wt-task-7"
 mkdir -p "$WORKTREE"
 cat > "$STATE/task-7.meta" <<EOF
@@ -141,73 +134,79 @@ set_reviews() {
   mv "$PR_VIEW.tmp" "$PR_VIEW"
 }
 
-try_merge() {
+REPORT="$TMP/readiness.txt"
+
+# Both forge logs are truncated per assessment, so every assertion reads only
+# the calls that one run made.
+assess_readiness() {  # [task-id]
   : > "$GH_AXI_LOG"
+  : > "$GH_LOG"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
     FM_TEST_GH_LOG="$GH_LOG" FM_TEST_GH_AXI_LOG="$GH_AXI_LOG" FM_TEST_PR_VIEW="$PR_VIEW" \
-    FM_TEST_PR_HEAD="$HEAD_SHA" \
-    "$ROOT/bin/fm-pr-auto-merge.sh" task-7 https://github.com/acme/app/pull/8 >/dev/null 2>&1
+    "$ROOT/bin/fm-pr-merge-readiness.sh" "${1:-task-7}" https://github.com/acme/app/pull/8 \
+    > "$REPORT" 2>&1
 }
 
-try_merge || fail "fully gated PR was not merged"
-grep -F 'pr merge 8 --repo acme/app --squash --delete-branch' "$GH_AXI_LOG" >/dev/null \
-  || fail "fully gated PR was not merged"
+# No readiness result is merge authority, so no run may reach a merge on any
+# path: gh-axi is how bin/fm-pr-merge.sh lands a PR, `gh pr merge` is the
+# lower-level path around it, and recorded pr= metadata is the trace either one
+# would leave behind.
+assert_nothing_merged() {  # <case>
+  [ ! -s "$GH_AXI_LOG" ] || fail "$1: a merge command was invoked through gh-axi"
+  if grep -qE 'pr (merge|review)' "$GH_LOG"; then
+    fail "$1: a merge or approval command was invoked through gh"
+  fi
+  if grep -qE '^(pr|pr_head)=' "$STATE"/*.meta; then
+    fail "$1: PR merge metadata was recorded, so a merge path ran"
+  fi
+}
 
-# The gate is not a lower-level merge command around fm-pr-merge.sh's guards: it
-# delegates to it, so the canonical pr= and the forge's exact pr_head= are
-# recorded before the squash and bin/fm-teardown.sh can still verify the landed
-# work once the branch is gone.
-grep -qxF 'pr=https://github.com/acme/app/pull/8' "$STATE/task-7.meta" \
-  || fail "automatic merge did not record pr= through fm-pr-merge.sh"
-grep -qxF "pr_head=$HEAD_SHA" "$STATE/task-7.meta" \
-  || fail "automatic merge did not record the exact pr_head= before merging"
-pass "automatic merge records PR metadata through fm-pr-merge.sh before merging"
+# A refusal must fail and name the condition that refused, so a not-merge-ready
+# report is actionable rather than a bare non-zero exit.
+refuses() {  # <cause> <case> [task-id]
+  if assess_readiness "${3:-task-7}"; then fail "$2: reported merge-ready"; fi
+  grep -F "not merge-ready: $1" "$REPORT" >/dev/null \
+    || fail "$2: refusal did not name its cause"
+  assert_nothing_merged "$2"
+}
+
+assess_readiness || fail "fully gated PR was not reported merge-ready"
+grep -E "^fm-pr-merge-readiness: merge-ready: https://github.com/acme/app/pull/8 at $HEAD_SHA\$" \
+  "$REPORT" >/dev/null || fail "merge-ready report did not name the PR and the head it covers"
+assert_nothing_merged "fully gated PR"
+pass "a fully gated PR is reported merge-ready and nothing is merged"
 
 set_reviews '[{"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-23T09:30:00Z","body":"Quality score: 5/5"}]'
-if try_merge; then fail "a 5/5 predating the current head authorized the merge"; fi
-[ ! -s "$GH_AXI_LOG" ] || fail "stale Greptile evidence still invoked merge"
+refuses 'no Greptile review posted after the current head commit' \
+  "a 5/5 predating the current head"
 
 set_reviews '[{"author":{"login":"helpful-bot"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"}]'
-if try_merge; then fail "a Greptile lookalike author authorized the merge"; fi
+refuses 'no Greptile review posted after the current head commit' \
+  "a Greptile lookalike author"
 
 set_reviews '[{"author":{"login":"my-greptile-bot"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"}]'
-if try_merge; then fail "a login containing greptile authorized the merge"; fi
+refuses 'no Greptile review posted after the current head commit' \
+  "a login containing greptile"
 
 set_reviews '[{"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 4/5"}]'
-if try_merge; then fail "a 4/5 Greptile score authorized the merge"; fi
+refuses 'Greptile score is not exactly 5/5' "a 4/5 Greptile score"
 
 set_reviews '[
   {"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"},
   {"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-24T12:00:00Z","body":"Quality score: 3/5"}
 ]'
-if try_merge; then fail "a superseded 5/5 authorized the merge"; fi
+refuses 'Greptile score is not exactly 5/5' "a superseded 5/5"
 
 set_reviews '[{"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-24T11:00:00Z","body":"Reads like a 5/5 change to me, but I cannot score it."}]'
-if try_merge; then fail "incidental 5/5 prose authorized the merge without a score field"; fi
+refuses 'latest Greptile review has no score field' "incidental 5/5 prose"
 
 set_reviews '[{"author":{"login":"greptile-apps[bot]"},"submittedAt":"2026-07-24T11:00:00Z","body":"Quality score: 5/5"}]'
-try_merge || fail "restored current 5/5 evidence did not merge"
+assess_readiness || fail "restored current 5/5 evidence was not reported merge-ready"
 
-pass "automatic merge requires the latest Greptile score field, posted after the head commit, to be exactly 5/5"
+pass "merge readiness requires the latest Greptile score field, posted after the head commit, to be exactly 5/5"
 
-jq 'del(.statusCheckRollup[] | select(.name == "Cypress E2E"))' "$PR_VIEW" > "$PR_VIEW.tmp"
-mv "$PR_VIEW.tmp" "$PR_VIEW"
-if try_merge; then
-  fail "PR without Cypress was allowed to auto-merge"
-fi
-[ ! -s "$GH_AXI_LOG" ] || fail "missing Cypress still invoked merge"
-
-jq '.statusCheckRollup += [{"name":"Cypress E2E","status":"COMPLETED","conclusion":"FAILURE"}]' \
-  "$PR_VIEW" > "$PR_VIEW.tmp"
-mv "$PR_VIEW.tmp" "$PR_VIEW"
-if try_merge; then
-  fail "failed Cypress was allowed to auto-merge"
-fi
-
-# Each remaining required gate is refused on its own. Cypress and Greptile were
-# covered above; Migration Drift, conflict-freedom, and exact-head No Mistakes
-# evidence are equally mandatory, so each one is removed from an otherwise
-# mergeable PR and must refuse by itself.
+# Each required gate is refused on its own, so no single missing or failing
+# condition can be carried by the others.
 mutate_pr_view() {  # <jq-program>
   write_pr_view
   jq "$1" "$PR_VIEW" > "$PR_VIEW.tmp"
@@ -215,58 +214,47 @@ mutate_pr_view() {  # <jq-program>
 }
 
 write_pr_view
-try_merge || fail "the restored baseline PR was not mergeable"
+assess_readiness || fail "the restored baseline PR was not reported merge-ready"
+
+mutate_pr_view 'del(.statusCheckRollup[] | select(.name == "Cypress E2E"))'
+refuses 'required Cypress check is missing' "a PR without Cypress"
+
+mutate_pr_view '.statusCheckRollup += [{"name":"Cypress E2E","status":"COMPLETED","conclusion":"FAILURE"}]'
+refuses 'every CI check must be green' "a PR with failing Cypress"
 
 mutate_pr_view 'del(.statusCheckRollup[] | select(.name == "Migration Drift / stg"))'
-if try_merge; then fail "PR without Migration Drift was allowed to auto-merge"; fi
-[ ! -s "$GH_AXI_LOG" ] || fail "missing Migration Drift still invoked merge"
+refuses 'required Migration Drift check is missing' "a PR without Migration Drift"
 
 mutate_pr_view '.statusCheckRollup |= map(
   if .name == "Migration Drift / stg" then .conclusion = "FAILURE" else . end)'
-if try_merge; then fail "failing Migration Drift was allowed to auto-merge"; fi
+refuses 'every CI check must be green' "a PR with failing Migration Drift"
 
 mutate_pr_view '.mergeable = "CONFLICTING"'
-if try_merge; then fail "a conflicted PR was allowed to auto-merge"; fi
-[ ! -s "$GH_AXI_LOG" ] || fail "a conflicted PR still invoked merge"
+refuses 'PR is not cleanly mergeable (CONFLICTING)' "a conflicted PR"
 
-# The delegation to fm-pr-merge.sh is reachable only from the gated feature-to-
-# stg path: every other base keeps the captain's explicit word (or yolo) as the
-# only merge authority, so the gate refuses before it ever delegates.
+# This gate describes the feature-to-stg path only. Any other base is outside
+# what it can speak to, so it refuses rather than reporting readiness.
 mutate_pr_view '.baseRefName = "main"'
-if try_merge; then fail "a PR based on main was allowed to auto-merge"; fi
-[ ! -s "$GH_AXI_LOG" ] || fail "a non-stg base still invoked merge"
+refuses 'this gate covers the feature-to-stg path only, found base main' \
+  "a PR based on main"
 
 # The recorded evidence names one exact commit, so a PR that gained a commit
-# after validation has no complete No Mistakes run for what would be merged.
+# after validation has no complete No Mistakes run for what it now contains.
 mutate_pr_view '.headRefOid = "999999999999cafe"
   | .commits += [{"oid":"999999999999cafe","committedDate":"2026-07-24T13:00:00Z"}]'
-if try_merge; then fail "a head commit with no No Mistakes evidence was auto-merged"; fi
-[ ! -s "$GH_AXI_LOG" ] || fail "stale No Mistakes evidence still invoked merge"
+refuses 'No Mistakes evidence does not match current PR head' \
+  "a head commit with no No Mistakes evidence"
 
 write_pr_view
-if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
-    FM_TEST_GH_LOG="$GH_LOG" FM_TEST_GH_AXI_LOG="$GH_AXI_LOG" FM_TEST_PR_VIEW="$PR_VIEW" \
-    "$ROOT/bin/fm-pr-auto-merge.sh" task-unvalidated https://github.com/acme/app/pull/8 \
-    >/dev/null 2>&1; then
-  fail "a task with no No Mistakes evidence at all was auto-merged"
+refuses 'missing complete No Mistakes evidence for task-unvalidated' \
+  "a task with no No Mistakes evidence at all" task-unvalidated
+
+pass "merge readiness requires exact No Mistakes evidence and every mandatory green gate, naming what refused"
+
+# The product is a report, so no merge or approval invocation may exist on any
+# path in the helper, including one guarded by every gate passing.
+if grep -vE '^[[:space:]]*#' "$ROOT/bin/fm-pr-merge-readiness.sh" \
+    | grep -qE 'pr[[:space:]]+(merge|review)|--auto|--squash|fm-pr-merge\.sh|fm-merge-local\.sh|gh-axi'; then
+  fail "the merge-readiness helper contains a merge or approval invocation"
 fi
-
-pass "automatic merge requires exact No Mistakes evidence and every mandatory green gate"
-
-# Authority isolation: passing every gate authorizes this one merge, it does not
-# grant a standing right to merge around fm-pr-merge.sh. A task whose metadata
-# cannot be recorded is refused at the merge step with every gate green, and
-# nothing is merged.
-write_pr_view
-FM_HOME="$HOME_DIR" "$ROOT/bin/fm-validation-record.sh" task-nometa "$HEAD_SHA" run-2 >/dev/null
-: > "$GH_AXI_LOG"
-if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
-    FM_TEST_GH_LOG="$GH_LOG" FM_TEST_GH_AXI_LOG="$GH_AXI_LOG" FM_TEST_PR_VIEW="$PR_VIEW" \
-    FM_TEST_PR_HEAD="$HEAD_SHA" \
-    "$ROOT/bin/fm-pr-auto-merge.sh" task-nometa https://github.com/acme/app/pull/8 \
-    >/dev/null 2>&1; then
-  fail "a task whose PR metadata could not be recorded was auto-merged"
-fi
-[ ! -s "$GH_AXI_LOG" ] || fail "an unrecordable task still invoked merge"
-
-pass "automatic merge cannot merge around fm-pr-merge.sh's own guards"
+pass "merge readiness reports only: no merge or approval path exists in the helper"

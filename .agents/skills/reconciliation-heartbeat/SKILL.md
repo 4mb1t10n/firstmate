@@ -89,15 +89,19 @@ Never approve a PR, never enable auto-merge on it, and never merge it.
 
 Every merge is the captain's own decision and the captain's own action, on every path, with no exception.
 
-`bin/fm-pr-auto-merge.sh` still ends by landing the PR, so do not invoke it until that trailing merge call is removed.
-
 After No Mistakes reports successful validation for the final PR head, record that exact head:
 
 ```sh
 bin/fm-validation-record.sh <task-id> <head-sha> [run-id]
 ```
 
-Then evaluate the merge gate yourself through `gh-axi`, reading the PR's base branch, mergeability, and check rollup and the latest Greptile review posted after the current head commit, and report its status to the captain.
+Then assess the gate and relay its result to the captain:
+
+```sh
+bin/fm-pr-merge-readiness.sh <task-id> <pr-url>
+```
+
+That helper only reports: it never approves, never enables auto-merge, and never merges, and a merge-ready result is an input to the captain's decision rather than authority to act on it.
 
 The PR is merge-ready only when all of these hold:
 

@@ -18,11 +18,11 @@ Every open issue in every configured project repository is authorized work.
 
 `bin/fm-validation-record.sh` records complete No Mistakes validation for one exact PR head commit.
 
-`bin/fm-pr-auto-merge.sh` owns the strict feature-to-`stg` merge gate.
+`bin/fm-pr-merge-readiness.sh` owns the strict feature-to-`stg` merge-readiness report.
 
-First Mate evaluates that gate and reports its status; it never approves a PR, never enables auto-merge, and never merges.
+It assesses the gate and reports the result; it never approves a PR, never enables auto-merge, and never merges.
 Every merge is the captain's decision and the captain's action, on every path.
-The script still ends by landing the PR, so it must not be invoked until that call is removed.
+A merge-ready report is an input to that decision, never authority to act on it.
 
 The agent-only `reconciliation-heartbeat` skill owns the reasoning procedure First Mate follows after the deterministic service wakes it.
 
@@ -96,13 +96,13 @@ An acknowledgement request older than the configured grace period is `control-pl
 
 An open issue inventory is `action-required` until First Mate accounts for the work and acknowledges the cycle.
 
-All merge checks are fail-closed.
+All merge-readiness checks are fail-closed.
 
 The Greptile gate reads only the latest review or comment posted after the current head commit by the exact login `greptile-apps[bot]`, and that review must carry its own score field reading exactly 5/5.
 
-A score from an earlier revision, a score from any other author, a superseded score, and prose that merely contains `5/5` all refuse the merge.
+A score from an earlier revision, a score from any other author, a superseded score, and prose that merely contains `5/5` are each reported as not merge-ready.
 
-The merge-gate command never edits code or tests and never relaxes a CI condition.
+The merge-readiness command never edits code or tests and never relaxes a CI condition.
 
 Any gate condition that is absent, pending, failing, or unverifiable is reported as not merge-ready.
 
