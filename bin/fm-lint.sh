@@ -48,6 +48,7 @@
 #   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
+#   fm-lint.sh --list-files            print the canonical file set
 #   fm-lint.sh --help                  print this usage
 set -u
 
@@ -118,6 +119,7 @@ fm_lint_usage() {
 
 JOBS=${FM_LINT_JOBS:-2}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
+LIST_FILES=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --jobs)
@@ -138,6 +140,10 @@ while [ "$#" -gt 0 ]; do
       TELEMETRY=${1#*=}
       shift
       ;;
+    --list-files)
+      LIST_FILES=1
+      shift
+      ;;
     --help|-h)
       fm_lint_usage
       exit 0
@@ -154,6 +160,22 @@ case "$JOBS" in
   1|2) ;;
   *) printf 'fm-lint.sh: jobs must be 1 or 2, got %s.\n' "$JOBS" >&2; exit 2 ;;
 esac
+
+if [ "$#" -gt 0 ]; then
+  ROOTS=("$@")
+else
+  ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
+fi
+ROOT_COUNT=${#ROOTS[@]}
+
+if [ "$LIST_FILES" -eq 1 ]; then
+  [ "$#" -eq 0 ] || {
+    printf 'fm-lint.sh: --list-files does not accept explicit paths.\n' >&2
+    exit 2
+  }
+  printf '%s\n' "${ROOTS[@]}"
+  exit 0
+fi
 
 # Ambient options can hide findings CI fails on, so drop them before the version
 # probe: the ShellCheck this resolves is then the ShellCheck it lints with.
@@ -205,15 +227,6 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
     "$REQUIRED_SHELLCHECK" "$resolved" "$REQUIRED_SHELLCHECK" >&2
   exit 1
 fi
-
-if [ "$#" -gt 0 ]; then
-  ROOTS=("$@")
-else
-  # Canonical file set: the one authoritative definition. Callers never repeat
-  # these globs, and every adapter and test shell remains an independent root.
-  ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
-fi
-ROOT_COUNT=${#ROOTS[@]}
 
 if [ -n "$TELEMETRY" ]; then
   telemetry_parent=$(dirname "$TELEMETRY")
