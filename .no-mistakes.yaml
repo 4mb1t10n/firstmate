@@ -14,9 +14,23 @@ disable_project_settings: true
 # lint step never ran the deterministic
 # `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` that CI runs, so info-level
 # ShellCheck findings (e.g. SC2015) were not surfaced locally before CI rejected
-# them. commands.lint delegates to bin/fm-lint.sh, the single owner of the lint
-# definition that .github/workflows/ci.yml also invokes, so local can never
-# diverge from CI again (parity asserted by tests/fm-lint.test.sh).
+# them. commands.lint runs bin/fm-lint.sh, the single owner of the lint definition
+# that .github/workflows/ci.yml also invokes, so local can never diverge from CI
+# again (parity asserted by tests/fm-lint.test.sh).
+#
+# bin/fm-lint.sh bootstraps its own pinned ShellCheck, so this stays a bare call to
+# the one owner. It refuses any ShellCheck other than the pin and the gate runs each
+# step in a fresh environment with nothing on PATH, so it used to exit 127 here and
+# the gate had no lint at all. Rather than re-download every push, it reuses a
+# version-and-platform-keyed user cache and only installs (checksum-verified, via
+# bin/fm-install-shellcheck.sh) on a cache miss or an invalid entry; a valid cache
+# lints offline, and a cold cache with no network fails closed instead of skipping
+# lint. Nothing outside this command has to be pre-installed.
+#
+# Keep the bootstrap inside bin/fm-lint.sh rather than a wrapper named here: this
+# file is honored from the protected default branch, so a wrapper introduced on a
+# feature branch is not yet the configured command on that branch's own first
+# validation run, and the lint step would still exit 127 there.
 #
 # Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
 # Test is intent-targeted validation of whether the change meets its brief;

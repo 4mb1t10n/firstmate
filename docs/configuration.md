@@ -106,7 +106,9 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verif
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
+The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and points `commands.lint` at `bin/fm-lint.sh`, the single owner of the lint definition, so local lint matches CI.
+Because the gate runs each step in a fresh environment with no ShellCheck on `PATH`, that script bootstraps the pin itself, but instead of re-downloading on every push it reuses a version-and-platform-keyed user cache and only installs (checksum-verified, via `bin/fm-install-shellcheck.sh`) on a cache miss or an invalid entry; a valid cache lints offline, while a cold cache with no network fails closed rather than skipping lint.
+When `PATH` already resolves exactly the pinned build, as on CI's runners, the bootstrap is skipped entirely and nothing is downloaded or cached.
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
 It does not set `commands.test` to a complete `tests/*.test.sh` walk.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
@@ -239,6 +241,16 @@ The optional local, gitignored `config/resource-admission-probe` (under the effe
 A nonzero exit, or an absent or non-executable probe, defers that heavy spawn to the durable queue under `state/resource-queue/` instead of starting it; it never blocks the guaranteed first three, and heavy work beyond the fourth slot is always queued regardless of the probe.
 Away-mode supervision drains the queue in enqueue order on the `FM_RESOURCE_DRAIN_SECS` cadence through `bin/fm-admit-queued.sh` as slots free.
 This section owns the probe's path, executable requirement, and admit/defer exit semantics; `bin/fm-resource-lib.sh` owns the exact slot-counting and liveness contract.
+
+## Reconciliation heartbeat
+
+The reconciliation heartbeat inventories every open issue and pull request in the configured project registry, reconstructs issue ownership, detects orphaned `in-progress` leases, inventories heavyweight child processes, and emits a durable wake when First Mate has work to advance.
+It runs immediately at locked session start under a whole-tick timeout, so a degraded forge delays recovery by a known bound instead of the per-request budget multiplied by the project registry.
+It may be called frequently by the host supervisor because not-due ticks are local-only and take no reconciliation lock.
+The cadence adapts to the work that exists; the `FM_RECONCILE_*_INTERVAL` defaults below carry each interval and [`reconciliation-heartbeat.md`](reconciliation-heartbeat.md) owns the selection rule.
+Set `FM_RECONCILE_SESSION_START=0` to skip only the session-start tick; the host supervisor's own ticks are unaffected.
+First Mate acknowledges each actionable cycle with `bin/fm-reconcile-ack.sh <token>` after performing the reconciliation procedure in [`reconciliation-heartbeat.md`](reconciliation-heartbeat.md).
+An acknowledgement that exceeds the grace interval changes reconciliation health to `control-plane-failed`, keeping partial control-plane failure visible until the exact outstanding token is acknowledged.
 
 ## Toolchain
 
@@ -389,6 +401,18 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_RECONCILE_ACTIVE_INTERVAL=600   # reconciliation cadence while a crew, PR, validation run, or issue lease is active, or the tick was degraded, even at zero open issues
+FM_RECONCILE_OPEN_IDLE_INTERVAL=1800   # reconciliation cadence while open issues exist without active work
+FM_RECONCILE_COMPLETE_INTERVAL=7200   # reconciliation cadence only when there is neither open nor active work
+FM_RECONCILE_ACK_GRACE=900   # seconds before an unacknowledged actionable cycle becomes a control-plane failure
+FM_RECONCILE_GH_TIMEOUT=30   # seconds allowed per bounded GitHub inventory request
+FM_RECONCILE_ISSUE_LIMIT=1000   # maximum open issues inventoried per configured repository
+FM_RECONCILE_PR_LIMIT=500   # maximum open pull requests inventoried per configured repository
+FM_RECONCILE_SESSION_START=1   # 0 skips the session-start reconciliation tick; a read-only (lock-refused) session always skips it
+FM_RECONCILE_SESSION_START_TIMEOUT=60   # whole-tick bound for the session-start reconciliation
+FM_RECONCILE_RESURFACE_SECS=600   # watcher cadence for re-surfacing the same unacknowledged reconciliation
+FM_PROCESS_OLD_SECS=21600   # elapsed seconds before an unowned heavyweight process becomes a cleanup candidate
+FM_PROCESS_MAX_ROWS=200   # maximum cleanup candidates reported per process inventory
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code

@@ -309,6 +309,13 @@ EOF
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
 
+  # The session-start tick runs without --json, so this digest is where the
+  # reconciliation renderer is actually shown to the operator.
+  assert_contains "$out" "RECONCILIATION" "digest did not label the reconciliation section"
+  assert_contains "$out" "ack_token: " "reconciliation section did not render the acknowledgement token line"
+  assert_not_contains "$out" "jq: error" "reconciliation section printed a jq compile error"
+  assert_not_contains "$out" "RECONCILIATION_ERROR" "a successful reconciliation tick was reported as a forge failure"
+
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
   assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \
     "digest did not label the shared captain section"
@@ -362,6 +369,11 @@ EOF
   assert_contains "$out" "READ-ONLY SESSION" "read-only banner missing on lock refusal"
   assert_contains "$out" "another live firstmate session holds the lock" "read-only banner did not surface fm-lock.sh's own error text"
   assert_contains "$out" "Skipping every mutating step" "read-only banner did not explain what was skipped"
+  # The reconciliation tick writes durable state, so it is skipped here too. The
+  # banner is the operator's only summary of what did not run, so omitting
+  # reconciliation from it would read as "reconciliation happened".
+  assert_contains "$out" "fleet sync, reconciliation, and wake-queue drain" \
+    "read-only banner did not list reconciliation among the skipped mutating steps"
   assert_contains "$out" "skipped (read-only session)" "wake-queue section did not report itself skipped"
   assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" "read-only guard did not surface watcher-liveness alarm"
   assert_contains "$out" "queued wakes pending - left untouched for the session holding the fleet lock" "read-only guard did not leave queued wakes to the lock holder"

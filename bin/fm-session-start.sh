@@ -31,16 +31,24 @@
 #                       MUTATING sweeps (legacy PR-check migration, secondmate
 #                       fast-forward, secondmate liveness, X-mode artifact writes, fleet sync) run only
 #                       when this session actually holds the lock.
-#   3. wake-drain     - mutates the durable wake queue, so it also only runs
+#   3. reconciliation - one forced bin/fm-reconcile.sh --tick under a whole-tick
+#                       timeout, so its actionable wake is already queued when
+#                       the drain below runs. It writes durable reconciliation
+#                       state, so it only runs when locked; a non-locked or
+#                       FM_RECONCILE_SESSION_START=0 session skips it. A failed
+#                       or timed-out tick prints RECONCILIATION_ERROR and never
+#                       aborts the rest of the digest.
+#                       docs/reconciliation-heartbeat.md owns the loop.
+#   4. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
-#   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   5. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
-#   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
-#   6. closing reminder - prints the context-specific watcher next step; this
+#   7. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
@@ -63,7 +71,8 @@
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute from a second
 # session.
-# Only the five mutating sweeps and the wake-queue drain are skipped.
+# Only the five mutating sweeps, the reconciliation tick, and the wake-queue
+# drain are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
@@ -254,8 +263,9 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
     printf '●  %s\n' "$LOCK_OUT"
     printf '●  Skipping every mutating step: PR-check migration, secondmate sync,\n'
-    printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
-    printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
+    printf '●  X-mode artifacts, fleet sync, reconciliation, and wake-queue drain.\n'
+    printf '●  Detect-only bootstrap diagnostics and the rest of this read-only-safe\n'
+    printf '●  digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
     printf '●  otherwise mutate fleet state from this session.\n'
     printf '%s\n' "$BAR"
@@ -275,7 +285,39 @@ else
   printf '(silent - all good)\n'
 fi
 
-# --- 3. wake-drain -------------------------------------------------------
+# --- 3. reconciliation heartbeat -------------------------------------------
+# A locked primary session forces one fresh GitHub reconciliation before the
+# wake queue is drained. The tick is non-fatal so an unavailable forge becomes
+# visible in its own output without suppressing the rest of recovery.
+# The whole tick is bounded once here, not just per GitHub request: this digest
+# is produced under the session lock and prints nothing until the tick returns,
+# so a degraded forge must delay session recovery by a known, small amount
+# rather than by the per-request budget multiplied by the project registry.
+RECONCILE_TIMEOUT=${FM_RECONCILE_SESSION_START_TIMEOUT:-60}
+case "$RECONCILE_TIMEOUT" in ''|*[!0-9]*|0) RECONCILE_TIMEOUT=60 ;; esac
+subsection "RECONCILIATION"
+if [ "$READ_ONLY" -eq 1 ]; then
+  printf 'skipped (read-only session)\n'
+elif [ "${FM_RECONCILE_SESSION_START:-1}" = 0 ]; then
+  printf 'skipped (FM_RECONCILE_SESSION_START=0)\n'
+else
+  if command -v timeout >/dev/null 2>&1; then
+    RECONCILE_OUT=$(timeout "$RECONCILE_TIMEOUT" "$SCRIPT_DIR/fm-reconcile.sh" --tick --force 2>&1)
+  elif command -v gtimeout >/dev/null 2>&1; then
+    RECONCILE_OUT=$(gtimeout "$RECONCILE_TIMEOUT" "$SCRIPT_DIR/fm-reconcile.sh" --tick --force 2>&1)
+  else
+    RECONCILE_OUT=$("$SCRIPT_DIR/fm-reconcile.sh" --tick --force 2>&1)
+  fi
+  RECONCILE_RC=$?
+  printf '%s\n' "$RECONCILE_OUT"
+  if [ "$RECONCILE_RC" -eq 124 ]; then
+    printf 'RECONCILIATION_ERROR: tick exceeded %ss and was stopped; GitHub inventory is stale. Repair the forge connection and rerun bin/fm-reconcile.sh --tick --force before dispatch.\n' "$RECONCILE_TIMEOUT"
+  elif [ "$RECONCILE_RC" -ne 0 ]; then
+    printf 'RECONCILIATION_ERROR: tick exited %s; continue recovery and repair GitHub inventory before dispatch.\n' "$RECONCILE_RC"
+  fi
+fi
+
+# --- 4. wake-drain -------------------------------------------------------
 # Drained records are this turn's first work queue (AGENTS.md section 8); the
 # drain also runs fm-guard.sh internally on the locked path, so the
 # tangle/watcher-liveness alarms land right here too, ahead of the bulk digest
@@ -324,7 +366,7 @@ fi
   --afk "$AFK_PRESENT" \
   --x-mode "$X_MODE_PRESENT"
 
-# --- 4. context digest -----------------------------------------------------
+# --- 5. context digest -----------------------------------------------------
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
@@ -332,7 +374,7 @@ print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
-# --- 5. fleet-state digest ---------------------------------------------
+# --- 6. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
@@ -386,7 +428,7 @@ else
   printf 'absent\n'
 fi
 
-# --- 6. closing reminder -----------------------------------------------
+# --- 7. closing reminder -----------------------------------------------
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
   cat <<'EOF'

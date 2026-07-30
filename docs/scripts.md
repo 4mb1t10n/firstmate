@@ -60,6 +60,12 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with loud cycle endings and bounded lifecycle ledger |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe always-on watcher: absorb benign wakes, queue and exit on actionable ones |
+| `fm-reconcile.sh`        | Inventory every configured repository and issue, persist adaptive heartbeat state, and wake First Mate for actionable work |
+| `fm-reconcile-ack.sh`    | Record First Mate's exact acknowledgement of the latest reconciliation cycle          |
+| `fm-issue-lease.sh`      | Reserve or release an issue through the exact `in-progress` label and durable local ownership evidence |
+| `fm-process-inventory.sh` | Report heavyweight child processes, parent-chain task ownership, and old unowned cleanup candidates; ambiguous, captain, and supervision processes are never candidates |
+| `fm-validation-record.sh` | Bind completed No Mistakes evidence to one task and exact PR head                    |
+| `fm-pr-merge-readiness.sh` | Report fail-closed whether one PR meets every feature-to-stg merge condition; it never approves and never merges |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
 | `fm-afk-launch.sh`       | Own away-mode entry, exit, rollback, and any backend terminal lifecycle                 |
 | `fm-afk-return.sh`       | Own deterministic return shutdown, catch-up evidence, and the firstmate-actionable blocker gate |

@@ -147,6 +147,11 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# An unacknowledged reconciliation latch is durable, so re-surfacing it on every
+# armed poll would exit the watcher immediately and starve every other scan. The
+# latch instead surfaces once per token and then re-surfaces on this bounded
+# cadence until fm-reconcile-ack.sh clears it.
+RECONCILE_RESURFACE_SECS=${FM_RECONCILE_RESURFACE_SECS:-600}
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
@@ -1035,6 +1040,34 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+
+  # Host-side reconciliation requests are already queued durably by
+  # fm-reconcile.sh. The pending marker is an acknowledgement latch: leave it in
+  # place until fm-reconcile-ack.sh confirms that First Mate accepted the
+  # inventory. It is evaluated alongside the crew scans rather than ahead of
+  # them, so a durable latch never starves signal, stale, and check triage, and
+  # it re-surfaces on a bounded cadence: a token not yet surfaced by this home
+  # wakes at once, and the same unacknowledged token wakes again only every
+  # RECONCILE_RESURFACE_SECS. Without that throttle a re-armed watcher would exit
+  # on every poll and the supervisor would restart it in a tight loop.
+  reconcile_marker="$STATE/.reconcile-resurfaced"
+  if [ -s "$STATE/reconcile/pending" ]; then
+    reconcile_reason=$(head -1 "$STATE/reconcile/pending" 2>/dev/null || true)
+    case "$reconcile_reason" in
+      reconcile:*)
+        reconcile_token=${reconcile_reason#*token=}
+        reconcile_token=${reconcile_token%% *}
+        if [ "$(cat "$reconcile_marker" 2>/dev/null || true)" != "$reconcile_token" ] \
+          || [ "$(age_of "$reconcile_marker")" -ge "$RECONCILE_RESURFACE_SECS" ]; then
+          printf '%s' "$reconcile_token" > "$reconcile_marker"
+          wake "$reconcile_reason"
+        fi
+        triage_log "absorbed unacknowledged reconcile $reconcile_token (rechecked every ${RECONCILE_RESURFACE_SECS}s)"
+        ;;
+    esac
+  elif [ -e "$reconcile_marker" ]; then
+    rm -f "$reconcile_marker"
+  fi
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

@@ -2,8 +2,9 @@
 # Contract: local no-mistakes Test is intent-targeted; CI owns broad regression.
 #
 # Firstmate must not configure commands.test as a complete tests/*.test.sh walk
-# (that duplicated CI and burned local pipeline time). Lint stays pinned to
-# bin/fm-lint.sh. Remote CI owns broad regression through separate portable and
+# (that duplicated CI and burned local pipeline time). The lint step stays
+# delegated to bin/fm-lint.sh, whatever else its command has to do to reach a
+# usable ShellCheck. Remote CI owns broad regression through separate portable and
 # required real-Herdr Behavior lanes composed around bin/fm-test-run.sh.
 set -u
 
@@ -21,8 +22,17 @@ test_nm_yaml_tracked() {
 }
 
 test_nm_keeps_lint_pin() {
-  grep -Fqx "  lint: 'bin/fm-lint.sh'" "$NM" \
-    || fail "commands.lint must remain exactly bin/fm-lint.sh"
+  # The pin is "the lint step reaches the one owner". bin/fm-lint.sh bootstraps the
+  # pinned ShellCheck it requires itself, so the configured command needs no wrapper
+  # to reach a usable ShellCheck in the gate's fresh per-step environment -
+  # tests/fm-lint.test.sh owns the rest of that bootstrap contract.
+  local cmd
+  cmd=$(sed -n "s/^  lint: '\(.*\)'\$/\1/p" "$NM" | sed "s/''/'/g")
+  [ -n "$cmd" ] || fail "commands.lint must be a single-line single-quoted command"
+  case "$cmd" in
+    *bin/fm-lint.sh*) : ;;
+    *) fail "commands.lint must still run bin/fm-lint.sh as its lint step; got: $cmd" ;;
+  esac
   pass "commands.lint stays pinned to bin/fm-lint.sh"
 }
 
