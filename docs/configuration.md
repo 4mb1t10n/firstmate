@@ -19,6 +19,7 @@ The producing PR and Relay helpers own the fields they append, `bin/fm-classify-
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
+`bin/fm-startup-network.sh`'s header owns the deferred network stage that keeps every external-network call, including the session-start reconciliation tick, off that digest's blocking path, including its state files and the safety argument for running them later.
 `docs/sessionstart-nudge.md` owns the native session-open adapter tiers that run or nudge the digest command, and the source routing between them.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
@@ -293,7 +294,7 @@ This section owns the probe's path, executable requirement, and admit/defer exit
 ## Reconciliation heartbeat
 
 The reconciliation heartbeat inventories every open issue and pull request in the configured project registry, reconstructs issue ownership, detects orphaned `in-progress` leases, inventories heavyweight child processes, and emits a durable wake when First Mate has work to advance.
-It runs immediately at locked session start under a whole-tick timeout, so a degraded forge delays recovery by a known bound instead of the per-request budget multiplied by the project registry.
+It runs immediately after locked session start in the bounded deferred network stage, so a degraded forge cannot block the startup digest and remains bounded independently of the per-request budget multiplied by the project registry.
 It may be called frequently by the host supervisor because not-due ticks are local-only and take no reconciliation lock.
 The cadence adapts to the work that exists; the `FM_RECONCILE_*_INTERVAL` defaults below carry each interval and [`reconciliation-heartbeat.md`](reconciliation-heartbeat.md) owns the selection rule.
 Set `FM_RECONCILE_SESSION_START=0` to skip only the session-start tick; the host supervisor's own ticks are unaffected.
@@ -324,14 +325,14 @@ An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: np
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
-The locked session-start bootstrap step also runs a best-effort project clone refresh through `fm-fleet-sync.sh`.
+The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.
 If bootstrap kills a timed-out refresh, it replays any completed `fm-fleet-sync.sh` output before the aggregate timeout skip so no finished result is lost.
 A killed refresh (or a teardown process kill) can leave an orphaned `.git/packed-refs.lock` in a clone, which makes the next refresh's fetch fail with Git's `Unable to create '...packed-refs.lock': File exists`.
 On that signature only, `fm-fleet-sync.sh` retries the fetch with a bounded wait for the lock to self-clear, then removes the lock and retries once more only when it can prove the lock stale, exactly like the `fm-teardown.sh` `index.lock` recovery.
 It never removes a live lock, leaves any other failure shape untouched, and prints every wait, retry, and removal to stderr plus a one-line `recovered:` summary to stdout on success so that this session-start relay still surfaces the recovery.
-The locked session-start bootstrap step also runs the guarded secondmate sync for recorded live homes, then propagates declared inherited local material into each validated live home.
+The same deferred network stage runs bootstrap's guarded secondmate sync for recorded live homes, then propagates declared inherited local material into each validated live home.
 Local routes use direct guarded filesystem operations, while remote routes delegate sync and allowlisted transfer through their configured SSH host without probing any unconfigured fleet.
 It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync reason, inheritance failed, or a divergent shared captain-preference copy was quarantined.
 When a running home advances and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, bootstrap sends the re-read nudge itself through the stable `fm-<id>` selector and reports the exact completed send as `BOOTSTRAP_INFO:`.
@@ -532,6 +533,9 @@ CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-s
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest; each line is capped by bin/fm-line-cap-lib.sh
 FM_SESSION_START_QUEUED_LIMIT=20   # plain queued backlog rows in the session-start digest; in-flight, held, and blocked rows are never bounded and done rows are never listed
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
+FM_BOOTSTRAP_NETWORK=all   # internal session-start phase split: all, skip (local steps only), or only (network steps only); see bin/fm-bootstrap.sh
+FM_STARTUP_NETWORK_TIMEOUT=120   # seconds bounding the whole deferred network stage; hitting it prints an actionable NETWORK_CHECKS line
+FM_TASKS_AXI_COMPATIBLE=   # internal one-hop handoff of an already-computed tasks-axi compatibility verdict (0 or 1); consumed when bin/fm-tasks-axi-lib.sh is sourced
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
 FM_POLL=15              # seconds between watcher poll cycles
@@ -547,7 +551,7 @@ FM_RECONCILE_GH_TIMEOUT=30   # seconds allowed per bounded GitHub inventory requ
 FM_RECONCILE_ISSUE_LIMIT=1000   # maximum open issues inventoried per configured repository
 FM_RECONCILE_PR_LIMIT=500   # maximum open pull requests inventoried per configured repository
 FM_RECONCILE_SESSION_START=1   # 0 skips the session-start reconciliation tick; a read-only (lock-refused) session always skips it
-FM_RECONCILE_SESSION_START_TIMEOUT=60   # whole-tick bound for the session-start reconciliation
+FM_RECONCILE_SESSION_START_TIMEOUT=60   # whole-tick cap within the deferred network stage's aggregate bound
 FM_RECONCILE_RESURFACE_SECS=600   # watcher cadence for re-surfacing the same unacknowledged reconciliation
 FM_PROCESS_OLD_SECS=21600   # elapsed seconds before an unowned heavyweight process becomes a cleanup candidate
 FM_PROCESS_MAX_ROWS=200   # maximum cleanup candidates reported per process inventory
