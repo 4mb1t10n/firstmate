@@ -46,6 +46,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-home-seed.sh`        | Transactionally provision a local secondmate home and maintain `data/secondmates.md` |
 | `fm-remote-home-seed.sh` | Register and provision a whole secondmate home on an SSH-reachable host              |
 | `fm-remote-readiness-lib.sh` | Shared remote second-mate readiness gate: check and, when needed, repair then re-check through `fm-remote-doctor.sh` |
+| [`fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) | Accepted origin-form owner shared by both remote provisioning boundaries |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-admit-queued.sh`     | Drain durable capacity-deferred heavy spawns in enqueue order under a single-drainer lock; away-supervision runs it on a cadence |
 | `fm-resource-lib.sh`     | Shared heavy-crew admission: liveness-gated slot count, in-flight reservations, headroom probe, and the durable spawn queue |
