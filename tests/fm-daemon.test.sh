@@ -22,6 +22,8 @@ if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
 fi
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
+FM_DAEMON_PRIMARY_HARNESS=claude
+export FM_DAEMON_PRIMARY_HARNESS
 
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
@@ -136,6 +138,57 @@ test_stale_transient_self_records_marker() {
   key=$(printf '%s' "$(window_to_task "sess:fm-qux-w4")" | tr ':/.' '___')
   [ -e "$state/.subsuper-stale-$key" ] || fail "stale marker was not recorded"
   pass "transient stale self-handles and records a persistence marker"
+}
+
+test_stale_diagnostic_wedge_survives_busy_housekeeping() {
+  local case_name dir state fakebin key task win pane reason status_line action_log
+  for case_name in working prior-terminal paused; do
+    dir=$(make_supercase "stale-diagnostic-$case_name")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    task="suffix-$case_name"
+    win="sess:fm-$task"
+    pane="$dir/pane.txt"
+    action_log="$dir/actions.log"
+    reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the run-step/pane state alone)"
+    fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+    case "$case_name" in
+      working) status_line='working: building' ;;
+      prior-terminal) status_line='done: already surfaced' ;;
+      paused) status_line='paused: awaiting an external dependency' ;;
+    esac
+    printf '%s\n' "$status_line" > "$state/$task.status"
+    printf 'Working...\n' > "$pane"
+    key=$(printf '%s' "$task" | tr ':/.' '___')
+    echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+    [ "$case_name" = prior-terminal ] \
+      && printf '%s' "$status_line" > "$state/.subsuper-seen-status-$key"
+    [ "$case_name" = paused ] \
+      && echo $(( $(date +%s) - 500 )) > "$state/.subsuper-paused-$key"
+
+    (
+      kill() { printf 'kill %s\n' "$*" >> "$action_log"; }
+      fm_backend_send_text_submit() { printf 'interrupt %s\n' "$*" >> "$action_log"; }
+      LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+        FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+    )
+    [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+      || fail "$case_name enriched wedge did not produce exactly one escalation"
+    grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+      || fail "$case_name enriched wedge lost its demand-deep-inspection detail"
+    [ ! -e "$state/.subsuper-stale-$key" ] \
+      || fail "$case_name enriched wedge retained ordinary stale tracking"
+    case "$case_name" in
+      paused) [ -e "$state/.subsuper-paused-$key" ] \
+        || fail "paused enriched wedge erased ordinary pause tracking" ;;
+      *) [ ! -e "$state/.subsuper-paused-$key" ] \
+        || fail "$case_name enriched wedge created pause tracking" ;;
+    esac
+    [ ! -s "$action_log" ] \
+      || fail "$case_name enriched wedge interrupted or killed the busy worker"
+  done
+  pass "enriched stale wedges bypass status absorption without disturbing busy workers"
 }
 
 test_stale_terminal_escalates() {
@@ -305,6 +358,10 @@ test_housekeeping_paused_resumed_cleared() {
   win="sess:fm-held-w12"; pane="$dir/pane.txt"
   printf 'paused: holding for the upstream tool release\n' > "$state/held-w12.status"
   printf 'Working...\n' > "$pane"
+  fm_write_meta "$state/held-w12.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" held-w12)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" held-w12 busy --gen "$gen" \
+    --source pi-ext --event agent-start
   key=$(printf '%s' "held-w12" | tr ':/.' '___')
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
@@ -392,6 +449,12 @@ test_housekeeping_resumed_stale_cleared() {
   pane="$dir/pane.txt"
   printf 'working\n' > "$state/res-w6.status"
   printf 'Working...\n' > "$pane"
+  # A resumed crew proves it is working through its own semantic busy-state
+  # record (bin/fm-busy-lib.sh), not through the pane's rendered footer.
+  fm_write_meta "$state/res-w6.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" res-w6)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" res-w6 busy --gen "$gen" \
+    --source pi-ext --event agent-start
   key=$(printf '%s' "res-w6" | tr ':/.' '___')
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
@@ -429,19 +492,26 @@ test_housekeeping_herdr_persistent_stale_resolves_meta() {
   pass "persistent herdr stale resolves the target from metadata and escalates"
 }
 
-test_housekeeping_herdr_idle_busy_footer_clears_stale() {
-  local dir state key
-  dir=$(make_supercase stale-herdr-idle-busy-footer)
+# A herdr crew whose native agent.get reads idle (generation state) but whose
+# own semantic busy-state record says busy is still working, so its stale
+# marker clears without escalating. The record - not the pane's rendered
+# footer - is what proves it.
+test_housekeeping_herdr_idle_busy_record_clears_stale() {
+  local dir state key gen
+  dir=$(make_supercase stale-herdr-idle-busy-record)
   state="$dir/state"
-  fm_write_meta "$state/herdr-footer.meta" "window=default:w1:p4" "backend=herdr"
+  fm_write_meta "$state/herdr-footer.meta" "window=default:w1:p4" "backend=herdr" "harness=claude"
   printf 'working\n' > "$state/herdr-footer.status"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" herdr-footer)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" herdr-footer busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
   key=$(printf '%s' "herdr-footer" | tr ':/.' '___')
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   (
     fm_backend_capture() {
       [ "$1" = herdr ] || fail "expected herdr capture backend, got $1"
       [ "$2" = "default:w1:p4" ] || fail "expected herdr window target, got $2"
-      printf 'esc to interrupt\n'
+      printf 'quiet\n'
     }
     fm_backend_busy_state() {
       [ "$1" = herdr ] || fail "expected herdr busy backend, got $1"
@@ -452,8 +522,8 @@ test_housekeeping_herdr_idle_busy_footer_clears_stale() {
     [ "$(fm_backend_busy_state herdr default:w1:p4)" = idle ] || fail "herdr busy stub did not report idle"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   ) || fail "herdr idle busy-footer housekeeping failed"
-  [ ! -e "$state/.subsuper-stale-$key" ] || fail "idle+busy-footer herdr stale marker was not cleared"
-  [ ! -s "$state/.subsuper-escalations" ] || fail "idle+busy-footer herdr stale was escalated"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "idle-native busy-record herdr stale marker was not cleared"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "idle-native busy-record herdr stale was escalated"
   pass "herdr idle busy-footer stale clears through capture corroboration"
 }
 
@@ -519,7 +589,7 @@ test_escalate_batches_into_one_digest() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"  # a proven-empty bare claude composer: STRICT injection needs positive proof
   escalate_add "$state" "event A: done: PR 1"
   escalate_add "$state" "event B: done: PR 2"
   afk_enter "$state"
@@ -545,7 +615,7 @@ test_escalate_batch_age_uses_first_append() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"  # a proven-empty bare claude composer: STRICT injection needs positive proof
   escalate_add "$state" "event A: done: PR 1"
   escalate_add "$state" "event B: done: PR 2"
   echo $(( $(date +%s) - 100 )) > "$state/.subsuper-escalations.since"
@@ -662,7 +732,7 @@ test_afk_absent_daemon_does_not_inject() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  capture="$dir/pane.txt"; : > "$capture"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"  # a proven-empty bare claude composer: STRICT injection needs positive proof
   escalate_add "$state" "done: PR 1"
   # afk flag deliberately NOT set
   if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
@@ -681,7 +751,6 @@ test_busy_guard_defers_when_supervisor_busy() {
   fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
   capture="$dir/pane.txt"
-  # pane shows a busy signature (firstmate mid-turn)
   printf 'esc to interrupt\n' > "$capture"
   escalate_add "$state" "done: PR 1"
   afk_enter "$state"
@@ -789,37 +858,46 @@ test_pane_input_pending_detects_partial_input() {
   pass "pane_input_pending detects partial input on the cursor line"
 }
 
-test_pane_input_pending_blank_is_not_pending() {
+test_pane_input_pending_blank_defers_strict() {
+  # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
+  # 2026-08-09): a blank cursor row with no positive container proof is
+  # `unknown` and the injector DEFERS. The permissive rule this replaced read
+  # the same row as `empty` and injected - into whatever the blank row really
+  # was (a modal dialog, a dead shell between stale transcript rules, a
+  # mid-redraw pane). This assertion IS the posture divergence: if it ever
+  # reads not-pending again, the permissive rule has silently returned.
   local dir state fakebin capture
   dir=$(make_supercase pending-blank)
   state="$dir/state"
   fakebin="$dir/fakebin"
   capture="$dir/pane.txt"
-  # Cursor line (line 3, cursor_y=2) is blank → not pending.
   printf 'some output\nmore output\n\n' > "$capture"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
     pane_input_pending "fakepane" \
-    && fail "blank composer line falsely detected as pending"
-  pass "pane_input_pending: blank cursor line is not pending"
+    || fail "a blank unidentified cursor row must defer under the strict rule, not read empty"
+  pass "pane_input_pending: a blank unidentified cursor row defers (strict container-proof rule)"
 }
 
-test_pane_input_pending_idle_prompt_not_pending() {
-  local dir state fakebin capture
+test_pane_input_pending_requires_proven_empty_prompt() {
+  local dir state fakebin capture prompt
   dir=$(make_supercase pending-prompt)
   state="$dir/state"
   fakebin="$dir/fakebin"
   capture="$dir/pane.txt"
-  # Cursor line (line 3, cursor_y=2) is a bare prompt ($) → idle → not pending.
-  printf 'output\noutput\n$ \n' > "$capture"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
-    pane_input_pending "fakepane" \
-    && fail "bare prompt falsely detected as pending"
-  # Bare > prompt also idle.
-  printf 'output\noutput\n> \n' > "$capture"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
-    pane_input_pending "fakepane" \
-    && fail "bare > prompt falsely detected as pending"
-  pass "pane_input_pending: bare prompts are not pending (idle)"
+  for prompt in '$' '>'; do
+    printf 'output\noutput\n%s \n' "$prompt" > "$capture"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
+      pane_input_pending "fakepane" \
+      || fail "bare shell prompt '$prompt' should defer as unknown"
+  done
+  for prompt in '❯' '›'; do
+    printf 'output\noutput\n%s \n' "$prompt" > "$capture"
+    if PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=2 \
+      pane_input_pending "fakepane"; then
+      fail "proven empty agent prompt '$prompt' should not defer"
+    fi
+  done
+  pass "pane_input_pending: only proven empty agent prompts pass"
 }
 
 # The safety fix at the tmux classifier (task fm-composer-shellglyph-safety): a
@@ -848,8 +926,8 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty() {
   local dir fakebin capture out
   dir=$(make_supercase composer-empty-agent)
   fakebin="$dir/fakebin"; capture="$dir/pane.txt"
-  printf '%s\n' "│ >                     │" > "$capture"
-  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+  printf '╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯\n' > "$capture"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
     fm_tmux_composer_state "fakepane")
   [ "$out" = empty ] || fail "a bordered '│ > │' composer should read empty, got '$out'"
   printf '%s\n' "❯ " > "$capture"
@@ -877,17 +955,16 @@ test_tmux_composer_state_requires_matching_box_borders() {
   pass "fm_tmux_composer_state: only matching edge borders form a composer box"
 }
 
-test_pane_input_pending_honors_idle_override_after_border_strip() {
-  local dir state fakebin capture
+test_pane_input_pending_preserves_bright_placeholder_like_draft() {
+  local dir fakebin capture
   dir=$(make_supercase pending-custom-idle)
-  state="$dir/state"
   fakebin="$dir/fakebin"
   capture="$dir/pane.txt"
-  printf '│ custom idle> │\n' > "$capture"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+  printf '╭────────────────╮\n│ custom idle>   │\n╰────────────────╯\n' > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
     FM_COMPOSER_IDLE_RE='^custom idle>$' pane_input_pending "fakepane" \
-    && fail "FM_COMPOSER_IDLE_RE was not applied after border stripping"
-  pass "pane_input_pending honors FM_COMPOSER_IDLE_RE after border stripping"
+    || fail "bright placeholder-like input must remain pending in a styled capture"
+  pass "pane_input_pending preserves bright placeholder-like drafts in styled captures"
 }
 
 test_classify_signal_dedup_against_scan() {
@@ -991,13 +1068,13 @@ test_pane_input_pending_bordered_idle_not_pending() {
   local dir state fakebin capture line
   dir=$(make_supercase pending-bordered-idle)
   state="$dir/state"; fakebin="$dir/fakebin"; capture="$dir/pane.txt"
-  for line in \
-    "│ >                                            │" \
-    "│ ❯                                            │" \
-    "│ >  │" \
-    "│                                              │"; do
-    printf '%s\n' "$line" > "$capture"
-    if PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+  for line in '>' '❯' ''; do
+    case "$line" in
+      '>') printf '╭────────────╮\n│ >          │\n╰────────────╯\n' > "$capture" ;;
+      '❯') printf '╭────────────╮\n│ ❯          │\n╰────────────╯\n' > "$capture" ;;
+      '') printf '╭────────────╮\n│            │\n╰────────────╯\n' > "$capture" ;;
+    esac
+    if PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
       pane_input_pending "fakepane"; then
       fail "bordered idle composer falsely detected as pending: <$line>"
     fi
@@ -1012,8 +1089,8 @@ test_pane_input_pending_bordered_with_text_is_pending() {
   local dir state fakebin capture
   dir=$(make_supercase pending-bordered-text)
   state="$dir/state"; fakebin="$dir/fakebin"; capture="$dir/pane.txt"
-  printf '%s\n' "│ > fix findings 1 and 3, skip 2               │" > "$capture"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=0 \
+  printf '╭────────────────────────────────────────────────╮\n│ > fix findings 1 and 3, skip 2                 │\n╰────────────────────────────────────────────────╯\n' > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
     pane_input_pending "fakepane" \
     || fail "real text inside a bordered composer was not detected as pending"
   pass "pane_input_pending: text inside a bordered composer is still pending"
@@ -1055,7 +1132,7 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
   dir=$(make_bordered_case maxdefer-stuck)
   state="$dir/state"; fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  printf '│ > │\n' > "$dir/composer"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   touch "$dir/.swallow"
   escalate_add "$state" "needs-decision: pick A"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
@@ -1077,7 +1154,7 @@ test_max_defer_flushes_empty_idle_pane() {
   dir=$(make_bordered_case maxdefer-recover)
   state="$dir/state"; fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  printf '│ > │\n' > "$dir/composer"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   escalate_add "$state" "done: PR https://x/y/pull/1"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
@@ -1094,7 +1171,7 @@ test_max_defer_pending_composer_alarms_without_typing() {
   dir=$(make_bordered_case maxdefer-pending-digest)
   state="$dir/state"; fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
-  printf '│ > human draft │\n' > "$dir/composer"
+  printf '╭─────────────────╮\n│ > human draft   │\n╰─────────────────╯\n' > "$dir/composer"
   escalate_add "$state" "needs-decision: pick B"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
@@ -1504,7 +1581,7 @@ test_fm_send_exits_nonzero_on_confirmed_swallow() {
     FM_SEND_SLEEP=0.05 "$ROOT/bin/fm-send.sh" sess:win 'route this work' >/dev/null 2>"$err" \
     || fail "fm-send exited non-zero on a clean submit: $(cat "$err")"
   # Persistent swallow -> exit non-zero with a clear message.
-  printf '│ > │\n' > "$dir/composer"
+  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   touch "$dir/.swallow"
   if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_SEND_SLEEP=0.05 \
@@ -1526,6 +1603,21 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
   fi
   grep -F 'text not sent' "$err" >/dev/null || fail "fm-send did not explain initial send failure: $(cat "$err")"
   pass "fm-send exits non-zero when initial text send fails"
+}
+
+test_fm_send_exits_nonzero_on_unproven_submit() {
+  local dir fakebin err
+  dir=$(make_bordered_case send-unproven)
+  fakebin="$dir/fakebin"; err="$dir/send.err"
+  touch "$dir/.swallow"
+  if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_SEND_SLEEP=0.05 \
+    "$ROOT/bin/fm-send.sh" sess:win '修复' >/dev/null 2>"$err"; then
+    fail "fm-send exited zero when submit proof remained pending-unproven"
+  fi
+  grep -F 'verdict=pending-unproven' "$err" >/dev/null \
+    || fail "fm-send did not preserve the unproven-submit verdict: $(cat "$err")"
+  pass "fm-send exits non-zero unless delivery is proven empty"
 }
 
 # --- herdr backend-awareness (fm-turnend-guard-h6-adjacent transport fix) ----
@@ -1578,40 +1670,38 @@ test_discover_supervisor_target_herdr() {
 }
 
 test_pane_is_busy_herdr_native_busy_state() {
+  local dir
+  dir=$(make_supercase primary-herdr-busy)
   (
     fm_backend_busy_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected busy_state args: $1 $2"; printf 'busy'; }
     fm_backend_capture() { fail "capture should not be consulted when busy_state is conclusive"; }
-    pane_is_busy "default:w1:p2" herdr || fail "pane_is_busy should report busy from herdr's native busy_state"
+    FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr \
+      || fail "pane_is_busy should report busy from herdr's native busy_state"
   ) || fail "herdr native-busy pane_is_busy subshell failed"
   pass "pane_is_busy: herdr native busy_state='busy' short-circuits without a capture fallback"
 }
 
-test_pane_is_busy_herdr_falls_back_to_capture_regex() {
+test_primary_busy_guard_is_harness_scoped() {
   (
     fm_backend_busy_state() { printf 'unknown'; }
-    fm_backend_capture() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected capture args: $1 $2"; printf 'esc to interrupt\n'; }
-    pane_is_busy "default:w1:p2" herdr || fail "pane_is_busy should fall back to the regex-over-capture reader when busy_state is unknown"
-  ) || fail "herdr capture-fallback pane_is_busy subshell failed"
-  pass "pane_is_busy: herdr falls back to the shared regex-over-capture reader when native busy_state is unknown"
-}
-
-test_pane_is_busy_herdr_idle_falls_back_to_capture_regex() {
-  (
-    fm_backend_busy_state() { printf 'idle'; }
-    fm_backend_capture() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected capture args: $1 $2"; printf 'esc to interrupt\n'; }
-    pane_is_busy "default:w1:p2" herdr || fail "pane_is_busy should fall back to the regex-over-capture reader when busy_state is idle"
-  ) || fail "herdr idle capture-fallback pane_is_busy subshell failed"
-  pass "pane_is_busy: herdr corroborates native idle with the shared regex-over-capture reader"
+    fm_backend_capture() { printf 'esc interrupt\n'; }
+    if FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr; then
+      fail "OpenCode's rendered signature must not classify a Claude primary busy"
+    fi
+    FM_DAEMON_PRIMARY_HARNESS=opencode pane_is_busy "default:w1:p2" herdr \
+      || fail "OpenCode's rendered signature should classify an OpenCode primary busy"
+  ) || fail "harness-scoped primary busy guard subshell failed"
+  pass "primary busy guard isolates rendered signatures by detected harness"
 }
 
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
   local dir fakebin capture
   dir=$(make_supercase busy-default-backend)
   fakebin="$dir/fakebin"; capture="$dir/pane.txt"
-  printf 'esc to interrupt\n' > "$capture"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" pane_is_busy "fakepane" \
+  printf 'Ctrl+c:cancel\n' > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture" FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=grok pane_is_busy "fakepane" \
     || fail "pane_is_busy with no backend arg should still default to tmux"
-  pass "pane_is_busy: omitted backend arg defaults to tmux (pre-existing callers unaffected)"
+  pass "pane_is_busy: omitted backend defaults to tmux for Grok's isolated fallback"
 }
 
 test_pane_input_pending_herdr_dispatch() {
@@ -1625,6 +1715,11 @@ test_pane_input_pending_herdr_dispatch() {
       fail "pane_input_pending should report not-pending for an empty herdr composer"
     fi
   ) || fail "herdr pane_input_pending (empty case) subshell failed"
+  (
+    fm_backend_composer_state() { printf 'future-state'; }
+    pane_input_pending "default:w1:p2" herdr \
+      || fail "pane_input_pending should defer on an unrecognized composer state"
+  ) || fail "herdr pane_input_pending (future-state case) subshell failed"
   pass "pane_input_pending: dispatches through fm_backend_composer_state for backend=herdr"
 }
 
@@ -1635,8 +1730,7 @@ test_inject_msg_herdr_busy_guard_defers() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected target_exists args: $1 $2"; return 0; }
-    fm_backend_busy_state() { printf 'busy'; }
-    fm_backend_capture() { fail "capture should not run when busy_state is conclusive"; }
+    pane_is_busy() { return 0; }
     fm_backend_composer_state() { fail "composer_state should not be consulted once the busy-guard already deferred"; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the busy-guard defers"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
@@ -1653,8 +1747,7 @@ test_inject_msg_herdr_composer_guard_defers() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 0; }
-    fm_backend_busy_state() { printf 'idle'; }
-    fm_backend_capture() { printf 'idle prompt\n'; }
+    pane_is_busy() { return 1; }
     fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the composer-guard defers"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
@@ -1671,7 +1764,7 @@ test_inject_msg_herdr_pane_gone_defers() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 1; }
-    fm_backend_busy_state() { fail "busy_state should not be consulted once the pane-exists check already failed"; }
+    pane_is_busy() { fail "busy guard should not be consulted once the pane-exists check already failed"; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the pane does not exist"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:gone" inject_msg "hello" "$state"; then
       fail "inject_msg should defer when the herdr target does not exist"
@@ -1687,8 +1780,7 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 0; }
-    fm_backend_busy_state() { printf 'idle'; }
-    fm_backend_capture() { printf 'idle prompt\n'; }
+    pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'empty'; }
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
@@ -1699,6 +1791,70 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
       || fail "inject_msg should succeed when send_text_submit confirms empty"
   ) || fail "herdr successful-submit inject_msg subshell failed"
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
+}
+
+test_inject_msg_respects_secondmate_turn_boundaries() {
+  local dir state err
+  dir=$(make_supercase inject-worker-quota)
+  state="$dir/state"
+  err="$dir/quota.err"
+  mkdir -p "$dir/config"
+  afk_enter "$state"
+  printf '%s\n' quota-secondmate > "$dir/.fm-secondmate-home"
+  printf '%s\n' '{"version":1,"codex":{"worker_minimum_percent_remaining":20,"active_worker_action":"drain-at-checkpoint"},"telemetry":{"maximum_snapshot_age_seconds":300,"stale_behavior":"deny"}}' \
+    > "$dir/config/quota-policy.json"
+  cat > "$dir/fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+remaining=${FM_FAKE_CODEX_REMAINING:-20}
+jq -n --argjson remaining "$remaining" --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  {schemaVersion:3,providers:[{provider:"codex",state:{status:"fresh",stale:false,refreshedAt:$refreshed},quotaSemantics:{status:"known",effectiveAvailability:[{scope:"all_models",status:"known",effectivePercentRemaining:$remaining}]}}]}'
+SH
+  chmod +x "$dir/fakebin/quota-axi"
+  (
+    fm_backend_target_exists() { fail "quota denial should happen before endpoint access"; }
+    pane_is_busy() { fail "quota denial should happen before busy inspection"; }
+    fm_backend_send_text_submit() { fail "quota denial should prevent away-mode submission"; }
+    if PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_WORKER_HARNESS=codex \
+      FM_WORKER_QUOTA_IDENTITY=structured FM_WORKER_QUOTA_TURN_GATE=none \
+      FM_FAKE_CODEX_REMAINING=100 \
+      FM_WORKER_MODEL=gpt-5 FM_SUPERVISOR_BACKEND=herdr \
+      FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" 2> "$err"; then
+      fail "inject_msg should defer native Codex without a verified turn-start gate"
+    fi
+    assert_contains "$(cat "$err")" "no verified turn-start quota gate" \
+      "away-mode native Codex refusal did not name the missing turn boundary"
+  ) || fail "secondmate worker-quota inject_msg subshell failed"
+  pass "inject_msg defers native Codex continuations without a turn-start gate"
+
+  printf '%s\n' $'pi\topenai-codex/gpt-5.6-sol' > "$state/.worker-runtime-identity"
+  (
+    fm_backend_target_exists() { fail "live Codex identity should deny before endpoint access"; }
+    pane_is_busy() { fail "live Codex identity should deny before busy inspection"; }
+    fm_backend_send_text_submit() { fail "live Codex identity should prevent away-mode submission"; }
+    if PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_WORKER_HARNESS=pi \
+      FM_WORKER_QUOTA_IDENTITY=structured FM_WORKER_QUOTA_TURN_GATE=before-agent-start \
+      FM_FAKE_CODEX_REMAINING=20 FM_WORKER_MODEL=anthropic/claude-sonnet-5 FM_SUPERVISOR_BACKEND=herdr \
+      FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" 2> "$err"; then
+      fail "live Codex identity should override a stale non-Codex launch model"
+    fi
+    assert_contains "$(cat "$err")" "20% remaining" \
+      "away-mode Pi Codex refusal did not reach the live worker boundary"
+  ) || fail "live Codex worker-identity denial subshell failed"
+  pass "inject_msg gates the current Pi Codex model instead of its launch model"
+
+  printf '%s\n' $'pi\tanthropic/claude-sonnet-5' > "$state/.worker-runtime-identity"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'empty'; }
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_WORKER_HARNESS=pi \
+      FM_WORKER_QUOTA_IDENTITY=structured FM_WORKER_QUOTA_TURN_GATE=before-agent-start \
+      FM_WORKER_MODEL=openai-codex/gpt-5.6-sol FM_SUPERVISOR_BACKEND=herdr \
+      FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
+      || fail "live non-Codex identity should override a stale Codex launch model"
+  ) || fail "live non-Codex worker-identity allow subshell failed"
+  pass "inject_msg releases a Pi worker after it switches away from Codex"
 }
 
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
@@ -1713,8 +1869,7 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 0; }
-    fm_backend_busy_state() { printf 'idle'; }
-    fm_backend_capture() { printf '$ \n'; }
+    pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'unknown'; }
     fm_backend_send_text_submit() { fail "send_text_submit must NOT run when the composer is a dead shell (unknown)"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
@@ -1722,6 +1877,23 @@ test_inject_msg_defers_on_dead_shell_unknown() {
     fi
   ) || fail "dead-shell inject_msg subshell failed"
   pass "inject_msg: defers on a dead-shell/unreadable composer (unknown), never typing the escalation into a shell"
+}
+
+test_inject_msg_defers_on_unrecognized_composer_state() {
+  local dir state
+  dir=$(make_supercase inject-future-composer-state)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'future-state'; }
+    fm_backend_send_text_submit() { fail "send_text_submit must not run for an unrecognized composer state"; }
+    if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
+      fail "inject_msg should defer on an unrecognized composer state"
+    fi
+  ) || fail "unrecognized composer-state inject_msg subshell failed"
+  pass "inject_msg: unrecognized composer states defer by default"
 }
 
 test_afk_start_refuses_when_flag_cannot_be_written
@@ -1732,6 +1904,7 @@ test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
+test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
@@ -1748,7 +1921,7 @@ test_housekeeping_paused_unpaused_cleared
 test_housekeeping_stale_marker_transitions_to_pause
 test_housekeeping_pause_marker_transitions_to_clear
 test_housekeeping_herdr_persistent_stale_resolves_meta
-test_housekeeping_herdr_idle_busy_footer_clears_stale
+test_housekeeping_herdr_idle_busy_record_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
@@ -1767,12 +1940,12 @@ test_afk_turn_exemption
 test_should_exit_afk_when_afk_inactive
 test_strip_injection_marker
 test_pane_input_pending_detects_partial_input
-test_pane_input_pending_blank_is_not_pending
-test_pane_input_pending_idle_prompt_not_pending
+test_pane_input_pending_blank_defers_strict
+test_pane_input_pending_requires_proven_empty_prompt
 test_tmux_composer_state_bare_shell_is_unknown
 test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders
-test_pane_input_pending_honors_idle_override_after_border_strip
+test_pane_input_pending_preserves_bright_placeholder_like_draft
 test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
@@ -1809,15 +1982,17 @@ test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
 test_fm_send_exits_nonzero_on_confirmed_swallow
 test_fm_send_exits_nonzero_on_initial_send_failure
+test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state
-test_pane_is_busy_herdr_falls_back_to_capture_regex
-test_pane_is_busy_herdr_idle_falls_back_to_capture_regex
+test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
+test_inject_msg_respects_secondmate_turn_boundaries
 test_inject_msg_defers_on_dead_shell_unknown
+test_inject_msg_defers_on_unrecognized_composer_state

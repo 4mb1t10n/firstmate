@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Send one line of literal text to a crewmate endpoint, then Enter.
-# Usage: fm-send.sh <target> <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -9,6 +9,14 @@
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
+# With the optional quota policy, submitting input requires recorded structured
+# launch provenance, and a Codex consumer also requires a verified turn-start
+# recheck. Native Codex has no such boundary, so its text and Enter deliveries
+# are refused while non-submitting controls remain usable.
+# Recorded submissions hold the task's lifecycle boundary from a metadata
+# re-resolution through quota admission and confirmed delivery, so checked input
+# cannot cross into a replacement endpoint. Escape, Ctrl+C, and Ctrl+U remain
+# outside that boundary so interruption and composer clearing stay available.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the target backend confirms a
@@ -37,6 +45,28 @@
 # re-sending a recovery request for an already-open expectation so a second
 # record is not created. Direct unmarked captain input never creates one.
 #
+# Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
+# before the message) when this send answers an open keyed needs-decision: or
+# blocked: record in the target task's state/<id>.status. After the submit is
+# confirmed, fm-send itself appends the closing
+# "resolved [key=<key>]: answered: <capped excerpt>" line to that status file,
+# so the captain-facing OPEN DECISIONS record closes at answer time and never
+# depends on the busy worker writing a matching resolved line. The close is a
+# LOCAL append for every target kind - crewmate, scout, local secondmate, and
+# remote secondmate alike - because the open-decision ledger fm-wake-drain
+# folds lives in this home's own state dir (a remote mate's escalations reach
+# it through the parent-replies ingest); only the answer message crosses the
+# backend or remote transport. Each named key must currently be open in that
+# ledger per status_open_decisions (bin/fm-classify-lib.sh) or fm-send refuses
+# before sending, so a mistyped key cannot deliver an answer while silently
+# orphaning the decision. A failed or unconfirmed send never closes a key; a
+# delivered answer whose closing append fails exits nonzero with the exact
+# manual close command, leaving the decision open to re-surface (the safe
+# direction). A send without the flag never closes anything: a routine steer,
+# working:, or done: event still cannot clear a captain decision. The flag is
+# refused with --key, with an explicit backend target (no task ledger in this
+# home), and with an empty message.
+#
 # After a successful text submit fm-send pauses FM_SEND_SETTLE seconds (default 1,
 # 0 disables) before returning: submit confirmation only proves the text was
 # accepted, but the harness needs a beat to spin up the turn before its busy
@@ -60,6 +90,7 @@ if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
 fi
 
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+ENDPOINT_META_OVERRIDE=${FM_SEND_ENDPOINT_META_OVERRIDE:-}
 if [ ! -d "$FM_HOME" ]; then
   echo "error: FM_HOME '$FM_HOME' is not a directory; fm-send cannot resolve this home's state" >&2
   exit 1
@@ -71,10 +102,18 @@ fi
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-line-cap-lib.sh
+. "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -82,6 +121,59 @@ fm_send_id_from_meta() {  # <meta-file>
   local base
   base=${1##*/}
   printf '%s' "${base%.meta}"
+}
+
+# fm_send_clear_after_interrupt: muse RESTORES the interrupted prompt back into
+# the composer when Escape cancels a turn, as real bright text (verified: fg
+# 38;2;204;211;219, luminance ~210, muse 0.1.0-R708.1), not de-emphasised ghost
+# text. Classifying that as pending input is correct - the text really is
+# unsubmitted - but leaving it there means the NEXT steer types onto the end of
+# it and submits both as one garbled message. Ctrl-U clears the composer
+# (verified), so the interrupt is not complete until it has been sent. A failed
+# clear is loud rather than silent, because the alternative is a corrupted steer.
+# WHICH adapters need that clear, and which key clears them, comes from the one
+# control-plane capability table (bin/fm-control-lib.sh) rather than a second
+# copy here - the same table bin/fm-control.sh's interrupt verb reads.
+fm_send_clear_after_interrupt() {  # <key>
+  local key=$1 family clear
+  [ "$key" = Escape ] || return 0
+  family=$(fm_control_harness_family "$TARGET_HARNESS") || return 0
+  clear=$(fm_control_interrupt_clear_key "$family") || return 0
+  [ -n "$clear" ] || return 0
+  [ "$TARGET_BACKEND" != remote ] || return 0
+  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL"; then
+    echo "error: Escape reached $T, but the $TARGET_HARNESS composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
+    return 1
+  fi
+}
+
+fm_send_normalize_key() {  # <key>
+  case "$1" in
+    Escape|escape|Esc|esc) printf '%s' Escape ;;
+    C-c|c-c|ctrl+c|Ctrl+c|Ctrl+C|ctrl-c|Ctrl-c|Ctrl-C|'Ctrl c'|'ctrl c') printf '%s' C-c ;;
+    C-u|c-u|ctrl+u|Ctrl+u|Ctrl+U|ctrl-u|Ctrl-u|'Ctrl u'|'ctrl u') printf '%s' C-u ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+fm_send_record_interrupt() {  # <key>
+  local key=$1 id gen
+  [ "$key" = Escape ] || return 0
+  case "$TARGET_HARNESS" in claude*) : ;; *) return 0 ;; esac
+  [ -n "$TARGET_META" ] || return 0
+  id=$(fm_send_id_from_meta "$TARGET_META")
+  [ -f "$TARGET_STATE/$id.busy-gen" ] || return 0
+  gen=$(fm_meta_get "$TARGET_META" busy_gen)
+  if [ -n "$gen" ]; then
+    "$FM_ROOT/bin/fm-busy-event.sh" apply "$TARGET_STATE" "$id" idle \
+      --gen "$gen" --source fm-interrupt --event interrupt
+  else
+    "$FM_ROOT/bin/fm-busy-event.sh" apply "$TARGET_STATE" "$id" idle \
+      --current-gen --source fm-interrupt --event interrupt
+  fi || {
+    echo "error: key '$key' reached $T, but the Claude interrupt state could not be recorded for $id" >&2
+    return 1
+  }
 }
 
 fm_send_meta_for_key_value() {  # <state-dir> <key> <value>
@@ -108,13 +200,58 @@ fm_send_resolve_target() {  # <raw-target>
   RESOLVED_TARGET=""
   TARGET_BACKEND=""
   TARGET_HARNESS=""
+  TARGET_MODEL=""
   EXPECTED_LABEL=""
   TARGET_META=""
+  TARGET_STATE=$STATE
   TARGET_SELECTOR=""
+  TARGET_REMOTE_ID=""
   RESOLUTION_TRIED=""
+
+  if [ -n "$ENDPOINT_META_OVERRIDE" ]; then
+    case "$ENDPOINT_META_OVERRIDE" in
+      /*.meta) ;;
+      *)
+        echo "error: endpoint metadata override must be an absolute .meta path" >&2
+        return 1
+        ;;
+    esac
+    id=$(fm_send_id_from_meta "$ENDPOINT_META_OVERRIDE")
+    if ! fm_backend_validate_task_endpoint "$ENDPOINT_META_OVERRIDE" "$id"; then
+      echo "error: endpoint metadata override '$ENDPOINT_META_OVERRIDE' is invalid" >&2
+      return 1
+    fi
+    target=$FM_BACKEND_VALIDATED_TARGET
+    backend=$FM_BACKEND_VALIDATED_BACKEND
+    if [ "$target" != "$raw" ]; then
+      echo "error: endpoint metadata override '$ENDPOINT_META_OVERRIDE' binds '$target', not requested target '$raw'" >&2
+      return 1
+    fi
+    RESOLVED_TARGET=$target
+    TARGET_BACKEND=$backend
+    TARGET_META=$ENDPOINT_META_OVERRIDE
+    TARGET_STATE=${ENDPOINT_META_OVERRIDE%/*}
+    TARGET_HARNESS=$(fm_meta_get "$TARGET_META" harness)
+    TARGET_MODEL=$(fm_meta_get "$TARGET_META" model)
+    RESOLUTION_TRIED="explicit endpoint metadata=$TARGET_META; backend=$TARGET_BACKEND"
+    return 0
+  fi
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
   if [ -n "$meta" ]; then
+    if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+      id=$(fm_send_id_from_meta "$meta")
+      RESOLVED_TARGET="remote:$id"
+      TARGET_BACKEND=remote
+      TARGET_META=$meta
+      TARGET_HARNESS=$(fm_meta_get "$meta" harness)
+      TARGET_MODEL=$(fm_meta_get "$meta" model)
+      EXPECTED_LABEL="fm-$id"
+      TARGET_SELECTOR=1
+      TARGET_REMOTE_ID=$id
+      RESOLUTION_TRIED="meta=$meta; placement=remote"
+      return 0
+    fi
     RESOLUTION_TRIED="meta=$meta; backend=from-meta"
     target=$(fm_backend_target_of_meta "$meta")
     if [ -z "$target" ]; then
@@ -126,12 +263,18 @@ fm_send_resolve_target() {  # <raw-target>
     TARGET_BACKEND=$backend
     TARGET_META=$meta
     TARGET_HARNESS=$(fm_meta_get "$meta" harness)
+    TARGET_MODEL=$(fm_meta_get "$meta" model)
     EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$raw" "$STATE")
     TARGET_SELECTOR=1
     return 0
   fi
 
   case "$raw" in
+    fm-*:*)
+      # A named Herdr session may itself begin with "fm-". Keep that explicit
+      # session:pane target on the validated backend-target path below rather
+      # than mistaking it for an unresolved task selector.
+      ;;
     fm-*)
       RESOLUTION_TRIED="meta=$STATE/$raw.meta; legacy-meta=$STATE/${raw#fm-}.meta; backend=none"
       echo "error: no metadata for $raw in $STATE (tried $RESOLUTION_TRIED); pass a well-formed explicit backend target only when targeting outside this firstmate home" >&2
@@ -159,6 +302,7 @@ fm_send_resolve_target() {  # <raw-target>
     TARGET_BACKEND=$(fm_backend_of_meta "$meta")
     TARGET_META=$meta
     TARGET_HARNESS=$(fm_meta_get "$meta" harness)
+    TARGET_MODEL=$(fm_meta_get "$meta" model)
     RESOLUTION_TRIED="explicit target '$raw' matched $meta; backend=$TARGET_BACKEND"
     return 0
   fi
@@ -186,12 +330,100 @@ fm_send_resolve_target() {  # <raw-target>
   return 1
 }
 
+SEND_CONTROL_LOCK=
+SEND_CONTROL_LOCK_HELD=0
+
+fm_send_cleanup() {
+  local status=$?
+  if [ "$SEND_CONTROL_LOCK_HELD" = 1 ]; then
+    SEND_CONTROL_LOCK_HELD=0
+    fm_lock_release "$SEND_CONTROL_LOCK" || true
+  fi
+  return "$status"
+}
+
+fm_send_lock_submission_target() {
+  local initial_meta=$TARGET_META id lock_dir
+  [ -n "$initial_meta" ] || return 0
+  id=$(fm_send_id_from_meta "$initial_meta")
+  lock_dir=${initial_meta%/*}
+  [ -n "$lock_dir" ] || lock_dir=/
+  SEND_CONTROL_LOCK="$lock_dir/.control-$id.lock"
+  fm_lock_acquire_wait "$SEND_CONTROL_LOCK" || return 1
+  SEND_CONTROL_LOCK_HELD=1
+  fm_send_resolve_target "$RAW_TARGET" || return 1
+  if [ "$TARGET_META" != "$initial_meta" ]; then
+    echo "error: target '$RAW_TARGET' changed lifecycle ownership during delivery; retry against its current task metadata" >&2
+    return 1
+  fi
+}
+
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
-T=$RESOLVED_TARGET
 shift
 
-fm_backend_validate "$TARGET_BACKEND" || exit 1
+# Collect --resolve-key flags (answerer-closes; see the header contract). They
+# must precede --key or the message text; everything after the last flag is the
+# message exactly as before, so ordinary sends are byte-identical.
+RESOLVE_KEYS=
+fm_send_add_resolve_key() {  # <key>
+  local k=$1
+  case "$k" in
+    ''|*[!A-Za-z0-9._-]*)
+      echo "error: --resolve-key '$k' is not a valid decision key (allowed: A-Z a-z 0-9 . _ -)" >&2
+      return 1
+      ;;
+  esac
+  case " $RESOLVE_KEYS " in
+    *" $k "*)
+      echo "error: duplicate --resolve-key '$k'" >&2
+      return 1
+      ;;
+  esac
+  RESOLVE_KEYS="${RESOLVE_KEYS}${RESOLVE_KEYS:+ }$k"
+}
+while :; do
+  case "${1:-}" in
+    --resolve-key)
+      [ $# -ge 2 ] || { echo "error: --resolve-key requires a key" >&2; exit 1; }
+      fm_send_add_resolve_key "$2" || exit 1
+      shift 2
+      ;;
+    --resolve-key=*)
+      fm_send_add_resolve_key "${1#--resolve-key=}" || exit 1
+      shift
+      ;;
+    *) break ;;
+  esac
+done
+
+semantic_key=
+if [ "${1:-}" = "--key" ]; then
+  [ $# -ge 2 ] || { echo "error: --key requires a key" >&2; exit 1; }
+  [ -z "$RESOLVE_KEYS" ] || {
+    echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
+    exit 1
+  }
+  semantic_key=$(fm_send_normalize_key "$2")
+fi
+
+trap fm_send_cleanup EXIT
+case "$semantic_key" in
+  Escape|C-c|C-u) ;;
+  *) fm_send_lock_submission_target || exit 1 ;;
+esac
+
+T=$RESOLVED_TARGET
+TARGET_QUOTA_IDENTITY=
+TARGET_QUOTA_TURN_GATE=
+if [ -n "$TARGET_META" ]; then
+  TARGET_QUOTA_IDENTITY=$(fm_meta_get "$TARGET_META" quota_identity)
+  TARGET_QUOTA_TURN_GATE=$(fm_meta_get "$TARGET_META" quota_turn_gate)
+fi
+
+if [ "$TARGET_BACKEND" != remote ]; then
+  fm_backend_validate "$TARGET_BACKEND" || exit 1
+fi
 
 # Classify a from-firstmate -> secondmate request. Only a task selector resolved
 # through this home's meta whose authoritative kind is secondmate is marked: the
@@ -207,10 +439,60 @@ if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARG
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
 fi
 
+# Validate the answerer-closes request before any durable mutation or send: the
+# target must have a task ledger in THIS home, the send must carry an answer
+# message, and every named key must be open right now in that ledger per the
+# ONE authoritative fold (status_open_decisions). Refusing here, before the
+# send, is what keeps a mistyped key loud instead of delivering an answer that
+# silently leaves its decision open.
+RESOLVE_STATUS_FILE=
+if [ -n "$RESOLVE_KEYS" ]; then
+  if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
+    echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
+    exit 1
+  fi
+  if [ "${1:-}" = "--key" ]; then
+    echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
+    exit 1
+  fi
+  if [ -z "$*" ]; then
+    echo "error: --resolve-key requires a nonempty answer message" >&2
+    exit 1
+  fi
+  RESOLVE_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+  RESOLVE_STATUS_FILE="$STATE/$RESOLVE_TASK_ID.status"
+  resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+  for k in $RESOLVE_KEYS; do
+    case "$resolve_open_set" in
+      "$k"$'\t'*|*$'\n'"$k"$'\t'*) ;;
+      *)
+        echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE (already closed, mistyped, or transferred). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+        exit 1
+        ;;
+    esac
+  done
+fi
+
+# Close each answered decision in this home's ledger, only after delivery is
+# fully confirmed. An append failure exits nonzero with the manual close
+# command; the decision then stays open and re-surfaces, never silently lost.
+fm_send_close_resolved_keys() {  # <answer-text>
+  local note=$1 k line
+  note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  for k in $RESOLVE_KEYS; do
+    line="resolved [key=$k]: answered: $note"
+    fm_cap_line_var "$line"
+    if ! printf '%s\n' "$FM_LINE_CAP_LINE" >> "$RESOLVE_STATUS_FILE"; then
+      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
+      return 1
+    fi
+  done
+}
+
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
 # scope the codex `$<skill>` popup-settle below. A task selector carries
-# meta; an explicit backend-target escape hatch has none, so its harness is
-# unknown and treated as non-codex (the safe default that keeps the fast path).
+# meta; an explicit backend-target escape hatch has none, so submitting input
+# is refused when the optional quota policy makes that missing identity unsafe.
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
 # Do not add a separate passive liveness preflight here. Active send paths own
@@ -220,12 +502,29 @@ fi
 # error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then
-  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
-    echo "error: key '$2' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
+  key=$2
+  case "$semantic_key" in
+    Escape|C-c|C-u) ;;
+    *) "$SCRIPT_DIR/fm-codex-quota-gate.sh" delivery "$TARGET_HARNESS" "${TARGET_MODEL:-default}" "$TARGET_QUOTA_IDENTITY" "$TARGET_QUOTA_TURN_GATE" || exit 1 ;;
+  esac
+  if [ "$TARGET_BACKEND" = remote ]; then
+    if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$semantic_key" < /dev/null; then
+      echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
+      exit 1
+    fi
+  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$semantic_key" "$EXPECTED_LABEL"; then
+    echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
+  fm_send_clear_after_interrupt "$semantic_key" || exit 1
+  fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
+  # Text and submitting keys use the delivery boundary; controls bypass it.
+  "$SCRIPT_DIR/fm-codex-quota-gate.sh" delivery "$TARGET_HARNESS" "${TARGET_MODEL:-default}" "$TARGET_QUOTA_IDENTITY" "$TARGET_QUOTA_TURN_GATE" || exit 1
+  # The pre-marker answer text, kept for the closing resolved note so the
+  # durable ledger records the plain answer without marker or corr bytes.
+  RESOLVE_ANSWER_TEXT=$MESSAGE
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
@@ -268,9 +567,27 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
-  # Type once, submit, verify. Lenient: only a positively-confirmed swallow
-  # (text still in the composer) is an error; an unreadable pane is assumed sent.
-  if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  # Type once, submit, verify. Only exact empty confirms delivery; every other
+  # verdict preserves the loud refusal boundary.
+  send_rc=0
+  if [ "$TARGET_BACKEND" = remote ]; then
+    if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
+      verdict=empty
+    else
+      send_rc=$?
+      verdict=send-failed
+    fi
+  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+    :
+  else
+    send_rc=$?
+  fi
+  if [ "$send_rc" -ne 0 ]; then
+    if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+      fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
+      echo "error: text delivery to remote secondmate $TARGET_REMOTE_ID is unknown; do not resend - same-host reconciliation is required" >&2
+      exit 1
+    fi
     if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
     fi
@@ -278,18 +595,20 @@ else
     exit 1
   fi
   case "$verdict" in
-    pending)
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
-      echo "error: text not submitted to $T (Enter swallowed; text left in composer; tried $RESOLUTION_TRIED)" >&2
-      exit 1
+    empty)
       ;;
     send-failed)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
       echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
+      exit 1
+      ;;
+    *)
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
   esac
@@ -308,8 +627,13 @@ else
       exit 1
     fi
   fi
-  # Submit landed (verdict was not pending/send-failed). Confirmation only proves
-  # the text was accepted; the harness still needs a beat to spin up the
+  # Delivery is fully confirmed: close each answered decision in this home's
+  # ledger (answerer-closes; see the header contract).
+  if [ -n "$RESOLVE_KEYS" ]; then
+    fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+  fi
+  # Submit landed with exact empty. Confirmation only proves the text was
+  # accepted; the harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the
   # crewmate actually working instead of the stale idle pane. FM_SEND_SETTLE=0
   # disables it. Scoped to this path only, never the shared submit core.

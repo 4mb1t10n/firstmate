@@ -9,28 +9,24 @@
 # HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
-# Pin lint to the same deterministic command CI runs, instead of leaving it to
-# no-mistakes' default handling. Without a configured commands.lint, the gate's
-# lint step never ran the deterministic
-# `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` that CI runs, so info-level
-# ShellCheck findings (e.g. SC2015) were not surfaced locally before CI rejected
-# them. commands.lint runs bin/fm-lint.sh, the single owner of the lint definition
-# that .github/workflows/ci.yml also invokes, so local can never diverge from CI
-# again (parity asserted by tests/fm-lint.test.sh).
-#
-# bin/fm-lint.sh bootstraps its own pinned ShellCheck, so this stays a bare call to
-# the one owner. It refuses any ShellCheck other than the pin and the gate runs each
-# step in a fresh environment with nothing on PATH, so it used to exit 127 here and
-# the gate had no lint at all. Rather than re-download every push, it reuses a
-# version-and-platform-keyed user cache and only installs (checksum-verified, via
-# bin/fm-install-shellcheck.sh) on a cache miss or an invalid entry; a valid cache
-# lints offline, and a cold cache with no network fails closed instead of skipping
-# lint. Nothing outside this command has to be pre-installed.
-#
-# Keep the bootstrap inside bin/fm-lint.sh rather than a wrapper named here: this
-# file is honored from the protected default branch, so a wrapper introduced on a
-# feature branch is not yet the configured command on that branch's own first
-# validation run, and the lint step would still exit 127 there.
+# Trusted documentation placement policy for the Document step.
+# The audience inventory and coding guideline own the detail; keep this as a
+# pointer so gate instructions cannot become a second prose policy.
+document:
+  instructions: |
+    Read docs/documentation-audiences.md and its machine-consumed
+    docs/documentation-audiences.json inventory before changing documentation.
+    Apply the knowledge-placement policy in
+    .agents/skills/firstmate-coding-guidelines/SKILL.md.
+    For changed prose, verify audience, authoritative owner, current relevance,
+    evidence destination, and unique safety facts, then review the complete
+    branch diff again after every documentation or lint fix.
+
+# Pin lint to the same owner CI runs instead of leaving it to no-mistakes'
+# default handling, which does not invoke the repository's canonical lint gate.
+# `bin/fm-lint.sh` owns the complete lint definition and
+# `.github/workflows/ci.yml` invokes it directly, bootstraps the pinned ShellCheck
+# when necessary, and has parity asserted by `tests/fm-lint.test.sh`.
 #
 # Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
 # Test is intent-targeted validation of whether the change meets its brief;
