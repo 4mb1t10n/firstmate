@@ -60,6 +60,29 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+remaining=${FM_FAKE_CODEX_REMAINING:-100}
+refreshed=${FM_FAKE_CODEX_REFRESHED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+jq -n --argjson remaining "$remaining" --arg refreshed "$refreshed" '
+  {
+    schemaVersion: 3,
+    providers: [{
+      provider: "codex",
+      state: {status: "fresh", stale: false, refreshedAt: $refreshed},
+      quotaSemantics: {
+        status: "known",
+        effectiveAvailability: [{
+          scope: "all_models",
+          status: "known",
+          effectivePercentRemaining: $remaining
+        }]
+      }
+    }]
+  }'
+SH
+  chmod +x "$fakebin/quota-axi"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -89,6 +112,12 @@ enable_dispatch_profile() {
   local home=$1
   printf '%s\n' '{"rules":[{"when":"current events","use":{"harness":"grok","model":"grok-4","effort":"high"}}],"default":{"harness":"codex","model":"gpt-5","effort":"medium"}}' \
     > "$home/config/crew-dispatch.json"
+}
+
+enable_quota_policy() {
+  local home=$1
+  printf '%s\n' '{"version":1,"codex":{"worker_minimum_percent_remaining":20,"brain_handoff_percent_remaining":10,"brain_emergency_minimum_percent_remaining":5,"active_worker_action":"drain-at-checkpoint"},"selection":"task-and-quota-aware","context":{"compaction_trigger_used_fraction":0.5},"telemetry":{"poll_seconds":60,"maximum_snapshot_age_seconds":300,"stale_behavior":"deny"}}' \
+    > "$home/config/quota-policy.json"
 }
 
 make_seeded_secondmate_home() {
@@ -724,6 +753,47 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_codex_quota_reserve_blocks_spawn_before_publication() {
+  local rec id out status
+  id=profile-codex-reserve-z17
+  rec=$(make_spawn_case profile-codex-reserve codex "$id")
+  read_case_record "$rec"
+  enable_quota_policy "$HOME_DIR"
+
+  export FM_FAKE_CODEX_REMAINING=20
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  unset FM_FAKE_CODEX_REMAINING
+
+  expect_code 1 "$status" "Codex spawn at the configured reserve should fail"
+  assert_contains "$out" "Codex worker denied at 80% consumed" \
+    "Codex reserve refusal did not expose current consumption"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "Codex reserve refusal should happen before task metadata is published"
+  [ ! -s "$LAUNCH_LOG" ] || fail "Codex reserve refusal still launched a pane"
+  pass "Codex quota reserve refuses a new worker before publication"
+}
+
+test_codex_quota_reserve_allows_spawn_above_cutoff() {
+  local rec id out status
+  id=profile-codex-headroom-z18
+  rec=$(make_spawn_case profile-codex-headroom codex "$id")
+  read_case_record "$rec"
+  enable_quota_policy "$HOME_DIR"
+
+  export FM_FAKE_CODEX_REMAINING=21
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  unset FM_FAKE_CODEX_REMAINING
+
+  expect_code 0 "$status" "Codex spawn above the configured reserve should succeed"
+  assert_contains "$out" "spawned $id harness=codex" \
+    "Codex spawn above the reserve did not launch"
+  assert_grep 'harness=codex' "$HOME_DIR/state/$id.meta" \
+    "Codex spawn above the reserve did not publish metadata"
+  pass "Codex quota reserve remains available above the cutoff"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
@@ -751,5 +821,7 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_codex_quota_reserve_blocks_spawn_before_publication
+test_codex_quota_reserve_allows_spawn_above_cutoff
 
 echo "# all fm-spawn-dispatch-profile tests passed"

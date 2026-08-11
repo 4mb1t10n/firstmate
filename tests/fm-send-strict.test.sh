@@ -82,13 +82,41 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/quota-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+remaining=${FM_FAKE_CODEX_REMAINING:-100}
+jq -n --argjson remaining "$remaining" --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  {
+    schemaVersion: 3,
+    providers: [{
+      provider: "codex",
+      state: {status: "fresh", stale: false, refreshedAt: $refreshed},
+      quotaSemantics: {
+        status: "known",
+        effectiveAvailability: [{
+          scope: "all_models",
+          status: "known",
+          effectivePercentRemaining: $remaining
+        }]
+      }
+    }]
+  }'
+SH
+  chmod +x "$fb/quota-axi"
   printf '%s\n' "$fb"
 }
 
 setup_home() {  # <name> -> echoes home dir
   local home="$TMP_ROOT/$1-$RANDOM"
-  mkdir -p "$home/state"
+  mkdir -p "$home/state" "$home/config"
   printf '%s\n' "$home"
+}
+
+enable_quota_policy() {
+  local home=$1
+  printf '%s\n' '{"version":1,"codex":{"worker_minimum_percent_remaining":20,"brain_handoff_percent_remaining":10,"brain_emergency_minimum_percent_remaining":5,"active_worker_action":"drain-at-checkpoint"},"selection":"task-and-quota-aware","context":{"compaction_trigger_used_fraction":0.5},"telemetry":{"poll_seconds":60,"maximum_snapshot_age_seconds":300,"stale_behavior":"deny"}}' \
+    > "$home/config/quota-policy.json"
 }
 
 test_exact_lane_id_send_still_works() {
@@ -197,6 +225,30 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_codex_quota_reserve_drains_at_text_checkpoint() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/codex-drain"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home codexdrain); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-drain.meta" "window=sess:fm-lane-drain" "kind=ship" "harness=codex"
+  enable_quota_policy "$home"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
+    "$SEND" lane-drain "start another turn" >/dev/null 2>"$err"; rc=$?
+  expect_code 1 "$rc" "a new Codex text turn at the reserve should fail"
+  assert_contains "$(cat "$err")" "let any active Codex turn drain at its checkpoint" \
+    "the active-worker refusal did not explain checkpoint draining"
+  [ ! -s "$log" ] || fail "a denied Codex text turn still reached the endpoint"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
+    "$SEND" lane-drain --key Escape >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a control key should remain available at the Codex reserve"
+  assert_contains "$(cat "$log")" "arg=Escape" \
+    "the control key did not reach the draining Codex worker"
+  pass "Codex workers drain at the text-turn checkpoint while control keys remain available"
+}
+
 # A --key send is how firstmate interrupts a worker, so its exit status is the
 # only signal that the interrupt actually landed.
 # Reporting success for a key that was never delivered would leave supervision
@@ -233,3 +285,4 @@ test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
+test_codex_quota_reserve_drains_at_text_checkpoint

@@ -452,6 +452,13 @@ spawn_remote_secondmate() {
       return 1
       ;;
   esac
+  if [ "$harness" = codex ]; then
+    "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker || {
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      return 1
+    }
+  fi
   model=${MODEL:--}
   effort=${EFFORT:--}
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
@@ -1298,6 +1305,14 @@ esac
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
+fi
+
+# An explicit captain reserve is a concrete spawn safeguard, so it runs after
+# harness resolution and before project, worktree, metadata, or endpoint
+# mutation. Relaunches pass through the same gate and cannot silently resume a
+# Codex worker after the reserve has been reached.
+if [ "$HARNESS" = codex ]; then
+  "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker || exit 1
 fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the

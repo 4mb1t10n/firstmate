@@ -425,6 +425,14 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
+  # A text send starts another model turn. Let control keys finish or interrupt
+  # the current turn, but refuse any new Codex work once the captain's reserve
+  # is reached. This is the active-worker drain checkpoint: the in-flight turn
+  # finishes, while retries, reviews, and follow-up steers move to another
+  # harness.
+  if [ "$TARGET_HARNESS" = codex ]; then
+    "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker || exit 1
+  fi
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE

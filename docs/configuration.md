@@ -304,6 +304,41 @@ Set `FM_RECONCILE_SESSION_START=0` to skip only the session-start tick; the host
 First Mate acknowledges each actionable cycle with `bin/fm-reconcile-ack.sh <token>` after performing the reconciliation procedure in [`reconciliation-heartbeat.md`](reconciliation-heartbeat.md).
 An acknowledgement that exceeds the grace interval changes reconciliation health to `control-plane-failed`, keeping partial control-plane failure visible until the exact outstanding token is acknowledged.
 
+## Codex quota reserve (config/quota-policy.json)
+
+`config/quota-policy.json` is an optional local, gitignored policy that protects a captain-selected Codex reserve at the concrete worker boundary.
+`FM_QUOTA_POLICY_PATH` may point at the same policy outside the FirstMate checkout for a declarative fleet deployment.
+When present, `fm-spawn.sh` takes a fresh `quota-axi --json` snapshot before every Codex spawn or relaunch, and `fm-send.sh` repeats the same gate before a text steer starts another Codex turn.
+Control keys remain available so an in-flight Codex turn can finish or be interrupted safely.
+At or below `worker_minimum_percent_remaining`, new Codex worker turns are refused and the first mate must resolve another task-compatible dispatch profile.
+Stale, malformed, missing, or older-schema telemetry fails closed for Codex workers.
+Other harnesses are not blocked by this file.
+Secondmate homes inherit the policy so nested crews cannot bypass the reserve.
+
+```json
+{
+  "version": 1,
+  "codex": {
+    "worker_minimum_percent_remaining": 20,
+    "brain_handoff_percent_remaining": 10,
+    "brain_emergency_minimum_percent_remaining": 5,
+    "active_worker_action": "drain-at-checkpoint"
+  },
+  "selection": "task-and-quota-aware",
+  "context": {
+    "compaction_trigger_used_fraction": 0.5
+  },
+  "telemetry": {
+    "poll_seconds": 60,
+    "maximum_snapshot_age_seconds": 300,
+    "stale_behavior": "deny"
+  }
+}
+```
+
+The brain handoff, fallback-selection, context-compaction, and polling fields document the full captain policy used by a compatible orchestrator such as First Mate Polly.
+The deterministic FirstMate shell boundary owns only the Codex worker reserve and active-worker checkpoint behavior.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -342,7 +377,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `quota-policy.json`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.
