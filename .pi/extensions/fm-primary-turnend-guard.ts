@@ -13,11 +13,17 @@ let guardFollowupActive = false;
 
 type LockOwnership = "owned" | "missing" | "other";
 
+type PiModelIdentity = {
+  provider?: string;
+  id?: string;
+};
+
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
+const quotaGate = `${root}/bin/fm-codex-quota-gate.sh`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
@@ -56,6 +62,26 @@ function lockOwnership(): LockOwnership {
 function markLoaded(): void {
   if (!existsSync(state) || lockOwnership() === "other") return;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+}
+
+function workerContinuationAllowed(model?: PiModelIdentity): boolean {
+  const activeModel = model?.provider && model.id
+    ? `${model.provider}/${model.id}`
+    : process.env.FM_WORKER_MODEL || "default";
+  const result = spawnSync(
+    "bash",
+    [
+      quotaGate,
+      "continuation",
+      process.env.FM_WORKER_HARNESS || process.env.FM_PI_HARNESS || "pi",
+      activeModel,
+    ],
+    {
+      cwd: root,
+      env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: root },
+    },
+  );
+  return result.status === 0;
 }
 
 // Pi's session_start reasons are startup | reload | new | resume | fork, and a
@@ -194,7 +220,7 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  pi.on("agent_settled", async () => {
+  pi.on("agent_settled", async (_event, ctx) => {
     if (guardFollowupActive) {
       guardFollowupActive = false;
       return;
@@ -202,6 +228,7 @@ export default function (pi: ExtensionAPI) {
 
     const result = await runGuard();
     if (result.code !== 2) return;
+    if (!workerContinuationAllowed(ctx?.model)) return;
 
     guardFollowupActive = true;
     try {

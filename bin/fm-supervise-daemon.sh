@@ -592,6 +592,12 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
+fm_daemon_worker_continuation_allowed() {
+  local harness=${FM_WORKER_HARNESS:-} model=${FM_WORKER_MODEL:-default}
+  [ -n "$harness" ] || harness=$(fm_daemon_primary_harness)
+  "$FM_DAEMON_DIR/fm-codex-quota-gate.sh" continuation "$harness" "$model"
+}
+
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
   harness=$(fm_daemon_primary_harness)
@@ -1146,6 +1152,8 @@ inject_msg() {  # <message> [state]
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
   afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  fm_daemon_worker_continuation_allowed \
+    || { log "inject deferred: worker continuation denied by quota policy"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then use the canonical typed envelope so downstream consumers retain

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Enforce the captain's Codex reserve before a worker starts another turn.
-# Usage: fm-codex-quota-gate.sh [worker [harness [model]]]
+# Usage: fm-codex-quota-gate.sh [worker|continuation [harness [model]]]
 #
 # Silent success means the optional policy is absent or current Codex
 # availability is above its configured reserve. Every configured uncertainty
@@ -18,15 +18,27 @@ MODEL=default
 [ "$#" -lt 2 ] || HARNESS=$2
 [ "$#" -lt 3 ] || MODEL=$3
 
-[ "$ROLE" = worker ] || {
-  echo "error: quota gate role must be worker" >&2
-  exit 2
-}
+case "$ROLE" in
+  worker|continuation) ;;
+  *)
+    echo "error: quota gate role must be worker or continuation" >&2
+    exit 2
+    ;;
+esac
 [ "$#" -le 3 ] || {
-  echo "error: quota gate accepts worker, harness, and model only" >&2
+  echo "error: quota gate accepts role, harness, and model only" >&2
   exit 2
 }
 [ -e "$POLICY" ] || [ -L "$POLICY" ] || exit 0
+
+if [ "$ROLE" = continuation ]; then
+  SECOND_MATE_MARKER="$FM_HOME/.fm-secondmate-home"
+  [ -e "$SECOND_MATE_MARKER" ] || [ -L "$SECOND_MATE_MARKER" ] || exit 0
+  [ -f "$SECOND_MATE_MARKER" ] && [ ! -L "$SECOND_MATE_MARKER" ] || {
+    echo "error: Codex worker denied because $SECOND_MATE_MARKER is not a regular secondmate identity file" >&2
+    exit 1
+  }
+fi
 
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
@@ -65,19 +77,27 @@ command -v quota-axi >/dev/null 2>&1 || {
   exit 1
 }
 
-if ! jq -e '
-  .version == 1
-  and (.codex.worker_minimum_percent_remaining == 20)
-  and (.codex.active_worker_action == "drain-at-checkpoint")
-  and (.telemetry.maximum_snapshot_age_seconds | type == "number" and . > 0 and floor == .)
-  and (.telemetry.stale_behavior == "deny")
-' "$POLICY" >/dev/null 2>&1; then
+policy_values=$(jq -er '
+  if (
+    .version == 1
+    and (.codex.worker_minimum_percent_remaining == 20)
+    and (.codex.active_worker_action == "drain-at-checkpoint")
+    and (.telemetry.maximum_snapshot_age_seconds | type == "number" and . > 0 and floor == .)
+    and (.telemetry.stale_behavior == "deny")
+  ) then
+    [.codex.worker_minimum_percent_remaining, .telemetry.maximum_snapshot_age_seconds]
+    | @tsv
+  else empty end
+' "$POLICY" 2>/dev/null) || {
   echo "error: Codex worker denied because $POLICY is invalid" >&2
   exit 1
-fi
+}
 
-minimum=$(jq -r '.codex.worker_minimum_percent_remaining' "$POLICY")
-maximum_age=$(jq -r '.telemetry.maximum_snapshot_age_seconds' "$POLICY")
+IFS=$'\t' read -r minimum maximum_age extra <<< "$policy_values"
+[ -n "$minimum" ] && [ -n "$maximum_age" ] && [ -z "${extra:-}" ] || {
+  echo "error: Codex worker denied because $POLICY is invalid" >&2
+  exit 1
+}
 snapshot=$(mktemp "${TMPDIR:-/tmp}/fm-codex-quota.XXXXXX")
 trap 'rm -f "$snapshot"' EXIT
 

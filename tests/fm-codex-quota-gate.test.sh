@@ -49,11 +49,17 @@ write_policy() {
     > "$home/config/quota-policy.json"
 }
 
+run_gate_role() {
+  local home=$1 role=$2 harness=$3 model=$4
+  shift 4
+  env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$@" \
+    "$GATE" "$role" "$harness" "$model" 2>&1
+}
+
 run_gate() {
   local home=$1 harness=$2 model=$3
   shift 3
-  env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$@" \
-    "$GATE" worker "$harness" "$model" 2>&1
+  run_gate_role "$home" worker "$harness" "$model" "$@"
 }
 
 test_optional_policy_and_exact_reserve() {
@@ -143,10 +149,74 @@ test_ambiguous_telemetry_fails_closed() {
   pass "Codex quota gate rejects telemetry with ambiguous cardinality"
 }
 
+test_internal_continuations_gate_only_secondmate_workers() {
+  local home calls out rc
+  home=$(make_case continuation)
+  calls="$home/quota.calls"
+  write_policy "$home"
+
+  out=$(run_gate_role "$home" continuation codex gpt-5 \
+    FM_FAKE_CODEX_REMAINING=20 FM_FAKE_QUOTA_CALLS="$calls"); rc=$?
+  expect_code 0 "$rc" "a captain continuation should remain outside the worker reserve"
+  [ ! -s "$calls" ] || fail "a captain continuation unnecessarily collected worker quota telemetry"
+
+  printf '%s\n' secondmate > "$home/.fm-secondmate-home"
+  out=$(run_gate_role "$home" continuation codex gpt-5 \
+    FM_FAKE_CODEX_REMAINING=20 FM_FAKE_QUOTA_CALLS="$calls"); rc=$?
+  expect_code 1 "$rc" "a secondmate continuation should be denied at the reserve"
+  assert_contains "$out" "20% remaining" "the secondmate continuation did not reach the worker cutoff"
+  pass "internal continuations gate secondmate workers without gating the captain"
+}
+
+test_policy_replacement_cannot_change_validated_cutoff() {
+  local home calls out rc real_jq
+  home=$(make_case policy-race)
+  calls="$home/policy.calls"
+  real_jq=$(command -v jq)
+  write_policy "$home"
+  printf '%s\n' '{"version":1,"codex":{"worker_minimum_percent_remaining":0,"active_worker_action":"drain-at-checkpoint"},"telemetry":{"maximum_snapshot_age_seconds":300,"stale_behavior":"deny"}}' \
+    > "$home/replacement-policy.json"
+  cat > "$home/fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+set -u
+policy_call=0
+for arg in "$@"; do
+  [ "$arg" = "$FM_FAKE_POLICY_PATH" ] && policy_call=1
+done
+if [ "$policy_call" -eq 1 ]; then
+  count=0
+  [ ! -f "$FM_FAKE_POLICY_CALLS" ] || count=$(cat "$FM_FAKE_POLICY_CALLS")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_FAKE_POLICY_CALLS"
+  "$FM_REAL_JQ" "$@"
+  status=$?
+  if [ "$count" -eq 1 ]; then
+    mv -f "$FM_FAKE_POLICY_REPLACEMENT" "$FM_FAKE_POLICY_PATH"
+  fi
+  exit "$status"
+fi
+exec "$FM_REAL_JQ" "$@"
+SH
+  chmod +x "$home/fakebin/jq"
+
+  out=$(run_gate "$home" codex gpt-5 \
+    FM_FAKE_CODEX_REMAINING=20 \
+    FM_REAL_JQ="$real_jq" \
+    FM_FAKE_POLICY_PATH="$home/config/quota-policy.json" \
+    FM_FAKE_POLICY_REPLACEMENT="$home/replacement-policy.json" \
+    FM_FAKE_POLICY_CALLS="$calls"); rc=$?
+  expect_code 1 "$rc" "an atomic policy replacement should not lower the already-validated cutoff"
+  assert_contains "$out" "20% remaining" "the policy replacement bypassed the captured cutoff"
+  [ "$(cat "$calls")" = 1 ] || fail "the gate read the mutable policy more than once"
+  pass "policy validation and extraction use one immutable read"
+}
+
 test_optional_policy_and_exact_reserve
 test_policy_shape_and_source_fail_closed
 test_quota_consumer_classification
 test_stale_telemetry_fails_closed
 test_ambiguous_telemetry_fails_closed
+test_internal_continuations_gate_only_secondmate_workers
+test_policy_replacement_cannot_change_validated_cutoff
 
 echo "# all fm-codex-quota-gate tests passed"

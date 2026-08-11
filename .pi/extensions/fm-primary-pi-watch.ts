@@ -56,6 +56,11 @@ type SessionGeneration = {
   seq: number;
 };
 
+type PiModelIdentity = {
+  provider?: string;
+  id?: string;
+};
+
 function refreshWatchToolShell(
   state: WatchToolShellState,
   theme: Theme,
@@ -83,6 +88,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const quotaGate = `${fmRoot}/bin/fm-codex-quota-gate.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
@@ -104,11 +110,34 @@ let activeGeneration: SessionGeneration | null = null;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
+let activeModel = process.env.FM_WORKER_MODEL || "default";
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   if (!Number.isFinite(value) || value <= 0) return fallback;
   return Math.floor(value);
+}
+
+function selectActiveModel(model?: PiModelIdentity): void {
+  if (!model?.provider || !model.id) return;
+  activeModel = `${model.provider}/${model.id}`;
+}
+
+function workerContinuationAllowed(): boolean {
+  const result = spawnSync(
+    "bash",
+    [
+      quotaGate,
+      "continuation",
+      process.env.FM_WORKER_HARNESS || process.env.FM_PI_HARNESS || "pi",
+      activeModel,
+    ],
+    {
+      cwd: fmRoot,
+      env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot },
+    },
+  );
+  return result.status === 0;
 }
 
 function parentPid(pid: string): string {
@@ -244,6 +273,7 @@ export default function (pi: ExtensionAPI) {
     recovery?: { generation: string; watcherPid: string },
   ): Promise<void> {
     if (!generationIsLive(owner)) return;
+    if (!workerContinuationAllowed()) throw new Error("worker continuation denied by quota policy");
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
@@ -479,10 +509,14 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  pi.on?.("session_start", () => {
+  pi.on?.("session_start", (_event, ctx) => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
+    selectActiveModel(ctx?.model);
     markLoaded();
+  });
+  pi.on?.("model_select", (event) => {
+    selectActiveModel(event.model);
   });
   pi.on?.("session_shutdown", () => {
     stopGeneration(generation);

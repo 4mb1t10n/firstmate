@@ -650,7 +650,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   id=profile-pi-signed-secondmate-z8d
   rec=$(make_spawn_case profile-pi-signed-secondmate codex "$id")
   read_case_record "$rec"
-  printf '%s\n' pi-signed > "$HOME_DIR/config/secondmate-harness"
+  printf '%s\n' 'pi-signed openai-codex/gpt-5.6-sol max' > "$HOME_DIR/config/secondmate-harness"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
   sm=$(cd "$sm" && pwd -P)
@@ -660,9 +660,9 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   expect_code 0 "$status" "pi-signed persistent secondmate spawn should succeed"
   assert_contains "$out" "spawned $id harness=pi-signed kind=secondmate" \
     "pi-signed secondmate spawn did not preserve its runtime identity"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+  assert_contains "$launch" "FM_WORKER_HARNESS='pi-signed' FM_WORKER_MODEL='openai-codex/gpt-5.6-sol' FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
@@ -858,6 +858,8 @@ test_secondmate_uses_materialized_quota_policy() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "FM_QUOTA_POLICY_PATH=" \
     "the secondmate launch did not clear the parent-only override path"
+  assert_contains "$launch" "FM_WORKER_HARNESS='codex' FM_WORKER_MODEL='default' codex" \
+    "the Codex secondmate launch did not retain its worker continuation identity"
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" \
     "the secondmate did not launch after policy materialization"
   pass "secondmates read the inherited local quota policy"

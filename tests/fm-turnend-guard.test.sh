@@ -988,7 +988,12 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+  cat > "$repo/bin/fm-codex-quota-gate.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh" \
+    "$repo/bin/fm-codex-quota-gate.sh"
   out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -1053,7 +1058,12 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
+  cat > "$repo/bin/fm-codex-quota-gate.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh" \
+    "$repo/bin/fm-codex-quota-gate.sh"
   out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
@@ -1081,6 +1091,62 @@ EOF
   expect_code 0 "$status" "Pi guard latch must reset after follow-up delivery failure"
   [ -z "$out" ] || fail "Pi delivery-failure guard test printed output: $out"
   pass ".pi primary extension: delivery failure resets the logical-run latch"
+}
+
+test_pi_extension_gates_secondmate_turnend_followup() {
+  local repo home ext quota_log out status
+  repo="$TMP_ROOT/pi-turnend-quota-root"
+  home="$TMP_ROOT/pi-turnend-quota-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  quota_log="$TMP_ROOT/pi-turnend-quota.log"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  printf '%s\n' pi-quota > "$home/.fm-secondmate-home"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'quota guard follow-up\n' >&2
+exit 2
+SH
+  cat > "$repo/bin/fm-codex-quota-gate.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_QUOTA_GATE_LOG:?}"
+exit 1
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-codex-quota-gate.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" FM_WORKER_HARNESS=pi \
+    FM_WORKER_MODEL=anthropic/claude-sonnet-5 FM_QUOTA_GATE_LOG="$quota_log" \
+    node --input-type=module 2>&1 <<'EOF'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let prompts = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  async sendUserMessage() {
+    prompts += 1;
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("agent_settled")(
+  { type: "agent_settled" },
+  { model: { provider: "openai-codex", id: "gpt-5.6-sol" } },
+);
+const args = readFileSync(process.env.FM_QUOTA_GATE_LOG, "utf8").trim();
+if (args !== "continuation pi openai-codex/gpt-5.6-sol") throw new Error(`unexpected quota args: ${args}`);
+if (prompts !== 0) throw new Error(`quota denial still delivered ${prompts} follow-ups`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi turn-end follow-ups should honor the secondmate worker quota gate"
+  [ -z "$out" ] || fail "Pi turn-end quota test printed output: $out"
+  pass "Pi turn-end follow-ups honor secondmate worker quota"
 }
 
 # --- --claude cooperative mode -----------------------------------------------
@@ -1644,6 +1710,7 @@ test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
+test_pi_extension_gates_secondmate_turnend_followup
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive

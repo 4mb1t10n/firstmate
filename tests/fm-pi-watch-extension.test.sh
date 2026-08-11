@@ -24,7 +24,11 @@ install_pi_watch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
-  chmod +x "$repo/bin/fm-operational-input.sh"
+  cat > "$repo/bin/fm-codex-quota-gate.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-operational-input.sh" "$repo/bin/fm-codex-quota-gate.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
 JSON
@@ -135,6 +139,69 @@ EOF
   expect_code 0 "$status" "Pi extension must surface an external healthy watcher as an owned-wake failure"
   [ -z "$out" ] || fail "Pi external-healthy test printed output: $out"
   pass "Pi extension reports external healthy watcher output"
+}
+
+test_pi_extension_gates_secondmate_followups() {
+  local repo home plugin quota_log out status
+  repo="$TMP_ROOT/pi-quota-root"
+  home="$TMP_ROOT/pi-quota-home"
+  quota_log="$TMP_ROOT/pi-quota-gate.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf '%s\n' pi-quota > "$home/.fm-secondmate-home"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  cat > "$repo/bin/fm-codex-quota-gate.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_QUOTA_GATE_LOG:?}"
+exit 1
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-codex-quota-gate.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    FM_WORKER_HARNESS=pi FM_WORKER_MODEL=anthropic/claude-sonnet-5 \
+    FM_QUOTA_GATE_LOG="$quota_log" FM_WATCH_REARM_RETRY_BASE_MS=5 \
+    FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=1 \
+    node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let handler = null;
+let modelSelect = null;
+let prompts = 0;
+const pi = {
+  on(event, callback) {
+    if (event === "model_select") modelSelect = callback;
+  },
+  registerCommand(name, options) {
+    if (name === "fm-watch-arm-pi") handler = options.handler;
+  },
+  registerTool() {},
+  sendUserMessage: async () => {
+    prompts += 1;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+modelSelect({ model: { provider: "openai-codex", id: "gpt-5.6-sol" } }, {});
+await handler("", { ui: { notify() {} } });
+for (let i = 0; i < 250 && !existsSync(process.env.FM_QUOTA_GATE_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_QUOTA_GATE_LOG)) throw new Error("quota gate was not called");
+const args = readFileSync(process.env.FM_QUOTA_GATE_LOG, "utf8").trim();
+if (args !== "continuation pi openai-codex/gpt-5.6-sol") throw new Error(`unexpected quota args: ${args}`);
+await new Promise((resolve) => setTimeout(resolve, 50));
+if (prompts !== 0) throw new Error(`quota denial still delivered ${prompts} follow-ups`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi watcher follow-ups should honor the secondmate worker quota gate"
+  [ -z "$out" ] || fail "Pi watcher quota test printed output: $out"
+  pass "Pi watcher follow-ups honor secondmate worker quota"
 }
 
 test_pi_tool_returns_agent_tool_result() {
@@ -2151,6 +2218,7 @@ EOF
 }
 
 test_pi_extension_reports_external_healthy_watcher
+test_pi_extension_gates_secondmate_followups
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop

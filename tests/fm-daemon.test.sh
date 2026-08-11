@@ -1793,6 +1793,37 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
 }
 
+test_inject_msg_respects_secondmate_worker_quota() {
+  local dir state err
+  dir=$(make_supercase inject-worker-quota)
+  state="$dir/state"
+  err="$dir/quota.err"
+  mkdir -p "$dir/config"
+  afk_enter "$state"
+  printf '%s\n' quota-secondmate > "$dir/.fm-secondmate-home"
+  printf '%s\n' '{"version":1,"codex":{"worker_minimum_percent_remaining":20,"active_worker_action":"drain-at-checkpoint"},"telemetry":{"maximum_snapshot_age_seconds":300,"stale_behavior":"deny"}}' \
+    > "$dir/config/quota-policy.json"
+  cat > "$dir/fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+jq -n --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  {schemaVersion:3,providers:[{provider:"codex",state:{status:"fresh",stale:false,refreshedAt:$refreshed},quotaSemantics:{status:"known",effectiveAvailability:[{scope:"all_models",status:"known",effectivePercentRemaining:20}]}}]}'
+SH
+  chmod +x "$dir/fakebin/quota-axi"
+  (
+    fm_backend_target_exists() { fail "quota denial should happen before endpoint access"; }
+    pane_is_busy() { fail "quota denial should happen before busy inspection"; }
+    fm_backend_send_text_submit() { fail "quota denial should prevent away-mode submission"; }
+    if PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_WORKER_HARNESS=codex \
+      FM_WORKER_MODEL=gpt-5 FM_SUPERVISOR_BACKEND=herdr \
+      FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" 2> "$err"; then
+      fail "inject_msg should defer a Codex secondmate continuation at the reserve"
+    fi
+    assert_contains "$(cat "$err")" "20% remaining" \
+      "away-mode quota refusal did not reach the secondmate worker boundary"
+  ) || fail "secondmate worker-quota inject_msg subshell failed"
+  pass "inject_msg defers secondmate Codex continuations at the reserve"
+}
+
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
 # must NEVER type an escalation into a dead-shell pane. A bare shell prompt
 # classifies `unknown` (not `pending`), and inject_msg now defers on anything
@@ -1929,5 +1960,6 @@ test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
+test_inject_msg_respects_secondmate_worker_quota
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state
