@@ -594,7 +594,31 @@ fm_daemon_primary_harness() {
 
 fm_daemon_worker_continuation_allowed() {
   local harness=${FM_WORKER_HARNESS:-} model=${FM_WORKER_MODEL:-default}
+  local identity record runtime_harness runtime_model extra
   [ -n "$harness" ] || harness=$(fm_daemon_primary_harness)
+  case "$harness" in
+    pi|pi-signed)
+      identity="$(_state_root)/.worker-runtime-identity"
+      if [ -e "$identity" ] || [ -L "$identity" ]; then
+        if [ -f "$identity" ] && [ ! -L "$identity" ]; then
+          record=$(cat "$identity" 2>/dev/null) || record=
+          IFS=$'\t' read -r runtime_harness runtime_model extra <<< "$record"
+          if [ -n "$runtime_harness" ] && [ -n "$runtime_model" ] \
+            && [ -z "${extra:-}" ] && [ "$runtime_harness" = "$harness" ] \
+            && [ "$record" = "$runtime_harness"$'\t'"$runtime_model" ]; then
+            harness=$runtime_harness
+            model=$runtime_model
+          else
+            harness=unknown
+            model=default
+          fi
+        else
+          harness=unknown
+          model=default
+        fi
+      fi
+      ;;
+  esac
   "$FM_DAEMON_DIR/fm-codex-quota-gate.sh" continuation "$harness" "$model"
 }
 

@@ -311,6 +311,7 @@ An acknowledgement that exceeds the grace interval changes reconciliation health
 Inheritance materializes the resolved override into each secondmate home's `config/quota-policy.json`, and the nested home reads that local copy.
 When present, `fm-spawn.sh` takes a fresh `quota-axi --json` snapshot before every spawn or relaunch whose resolved harness and model consume Codex quota, and `fm-send.sh` repeats the same gate before a text steer starts another Codex turn.
 Internal Pi watcher and turn-end follow-ups and away-mode supervisor injections pass through the same worker gate in secondmate homes, while the captain brain remains outside this worker reserve.
+Pi model changes update both later shell-command environments and the shared runtime identity consumed by each away-mode injection, while terminal-backed away mode also carries the current launch identity into its detached daemon.
 Pi and Pi Signed profiles using an `openai-codex/*` model consume the protected quota, while a provider-unqualified Pi profile or an explicit endpoint without recorded harness identity is refused because its quota consumption cannot be proven.
 Non-submitting control keys remain available so an in-flight Codex turn can finish or be interrupted safely, but `Enter` is gated because it can submit pending composer text.
 At or below `worker_minimum_percent_remaining`, new Codex worker turns are refused and the first mate must resolve another task-compatible dispatch profile.

@@ -1822,6 +1822,32 @@ SH
       "away-mode quota refusal did not reach the secondmate worker boundary"
   ) || fail "secondmate worker-quota inject_msg subshell failed"
   pass "inject_msg defers secondmate Codex continuations at the reserve"
+
+  printf '%s\n' $'pi\topenai-codex/gpt-5.6-sol' > "$state/.worker-runtime-identity"
+  (
+    fm_backend_target_exists() { fail "live Codex identity should deny before endpoint access"; }
+    pane_is_busy() { fail "live Codex identity should deny before busy inspection"; }
+    fm_backend_send_text_submit() { fail "live Codex identity should prevent away-mode submission"; }
+    if PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_WORKER_HARNESS=pi \
+      FM_WORKER_MODEL=anthropic/claude-sonnet-5 FM_SUPERVISOR_BACKEND=herdr \
+      FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" 2> "$err"; then
+      fail "live Codex identity should override a stale non-Codex launch model"
+    fi
+  ) || fail "live Codex worker-identity denial subshell failed"
+  pass "inject_msg gates the current Pi Codex model instead of its launch model"
+
+  printf '%s\n' $'pi\tanthropic/claude-sonnet-5' > "$state/.worker-runtime-identity"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'empty'; }
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_WORKER_HARNESS=pi \
+      FM_WORKER_MODEL=openai-codex/gpt-5.6-sol FM_SUPERVISOR_BACKEND=herdr \
+      FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
+      || fail "live non-Codex identity should override a stale Codex launch model"
+  ) || fail "live non-Codex worker-identity allow subshell failed"
+  pass "inject_msg releases a Pi worker after it switches away from Codex"
 }
 
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector

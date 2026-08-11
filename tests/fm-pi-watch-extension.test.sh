@@ -204,6 +204,61 @@ EOF
   pass "Pi watcher follow-ups honor secondmate worker quota"
 }
 
+test_pi_extension_propagates_runtime_model() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-runtime-model-root"
+  home="$TMP_ROOT/pi-runtime-model-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    FM_WORKER_MODEL=anthropic/claude-sonnet-5 node --input-type=module 2>&1 <<'EOF'
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let modelSelect = null;
+const pi = {
+  on(event, callback) {
+    if (event === "model_select") modelSelect = callback;
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+
+function inheritedModel() {
+  const result = spawnSync(process.execPath, ["-e", "process.stdout.write(process.env.FM_WORKER_MODEL ?? '')"], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) throw new Error(result.stderr);
+  return result.stdout;
+}
+
+modelSelect({ model: { provider: "openai-codex", id: "gpt-5.6-sol" } }, {});
+if (inheritedModel() !== "openai-codex/gpt-5.6-sol") {
+  throw new Error(`Codex model was not propagated: ${inheritedModel()}`);
+}
+if (readFileSync(`${process.env.FM_HOME}/state/.worker-runtime-identity`, "utf8") !== "pi\topenai-codex/gpt-5.6-sol\n") {
+  throw new Error("Codex model was not published for the away daemon");
+}
+modelSelect({ model: { provider: "anthropic", id: "claude-sonnet-5" } }, {});
+if (inheritedModel() !== "anthropic/claude-sonnet-5") {
+  throw new Error(`non-Codex model was not propagated: ${inheritedModel()}`);
+}
+if (readFileSync(`${process.env.FM_HOME}/state/.worker-runtime-identity`, "utf8") !== "pi\tanthropic/claude-sonnet-5\n") {
+  throw new Error("non-Codex model was not published for the away daemon");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi runtime model changes should reach later shell commands"
+  [ -z "$out" ] || fail "Pi runtime-model propagation test printed output: $out"
+  pass "Pi runtime model changes propagate to shell commands and the away daemon"
+}
+
 test_pi_tool_returns_agent_tool_result() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-tool-result-root"
@@ -2219,6 +2274,7 @@ EOF
 
 test_pi_extension_reports_external_healthy_watcher
 test_pi_extension_gates_secondmate_followups
+test_pi_extension_propagates_runtime_model
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop

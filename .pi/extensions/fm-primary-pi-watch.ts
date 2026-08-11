@@ -9,8 +9,8 @@
 // quit leaves the final generation stopped so late callbacks cannot rearm. Stale
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -90,6 +90,8 @@ const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
 const quotaGate = `${fmRoot}/bin/fm-codex-quota-gate.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
+const workerIdentityPath = `${state}/.worker-runtime-identity`;
+const workerHarness = process.env.FM_WORKER_HARNESS || process.env.FM_PI_HARNESS || "pi";
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
@@ -111,6 +113,7 @@ const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
 let activeModel = process.env.FM_WORKER_MODEL || "default";
+process.env.FM_WORKER_HARNESS = workerHarness;
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -121,6 +124,24 @@ function positiveInteger(name: string, fallback: number): number {
 function selectActiveModel(model?: PiModelIdentity): void {
   if (!model?.provider || !model.id) return;
   activeModel = `${model.provider}/${model.id}`;
+  process.env.FM_WORKER_MODEL = activeModel;
+  publishWorkerIdentity();
+}
+
+function publishWorkerIdentity(): void {
+  if (lockOwnership() === "other") return;
+  mkdirSync(state, { recursive: true });
+  const temporaryPath = `${workerIdentityPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporaryPath, `${workerHarness}\t${activeModel}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    renameSync(temporaryPath, workerIdentityPath);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
 }
 
 function workerContinuationAllowed(): boolean {
@@ -575,4 +596,5 @@ export default function (pi: ExtensionAPI) {
   });
 
   markLoaded();
+  publishWorkerIdentity();
 }
