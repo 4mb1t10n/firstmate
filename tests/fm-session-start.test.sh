@@ -682,7 +682,7 @@ write_pi_loaded_markers() {
 # --- context digest: absent vs empty vs present -----------------------------
 
 test_context_digest_absent_empty_present() {
-  local rec root home fakebin out reconcile_out
+  local rec root home fakebin out
   rec=$(new_world context-digest)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -698,17 +698,6 @@ EOF
 
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
-
-  # The session-start tick runs without --json in the deferred network worker.
-  # Wait for its durable report rather than racing whether the digest harvested
-  # it inline before this fast fixture finished.
-  wait_for_network_stage "$home" "$root" 30 \
-    || fail "the deferred reconciliation never finished: $(network_stage_report "$home" "$root")"
-  reconcile_out=$(network_stage_report "$home" "$root")
-  assert_contains "$reconcile_out" "RECONCILIATION" "deferred report did not label the reconciliation section"
-  assert_contains "$reconcile_out" "ack_token: " "reconciliation section did not render the acknowledgement token line"
-  assert_not_contains "$reconcile_out" "jq: error" "reconciliation section printed a jq compile error"
-  assert_not_contains "$reconcile_out" "RECONCILIATION_ERROR" "a successful reconciliation tick was reported as a forge failure"
 
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
   assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \

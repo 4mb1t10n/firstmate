@@ -612,6 +612,33 @@ GITHUB_TOKEN=ghp_supersecretvalue" \
   pass "fm-startup-network: the timing artifact cannot carry a command line or forge records"
 }
 
+test_locked_stage_runs_session_start_reconciliation_off_the_blocking_path() {
+  local rec home root log report_out
+  rec=$(new_world deferred-reconciliation)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+  rm -f "$root/bin/fm-reconcile.sh"
+  cat > "$root/bin/fm-reconcile.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'ack_token: deferred-test-token'
+SH
+  chmod +x "$root/bin/fm-reconcile.sh"
+
+  FM_RECONCILE_SESSION_START=1 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" run --locked 1
+
+  report_out=$(FM_RECONCILE_SESSION_START=1 run_stage "$home" "$root" report)
+  assert_contains "$report_out" "RECONCILIATION" \
+    "the deferred report did not label the reconciliation section"
+  assert_contains "$report_out" "ack_token: deferred-test-token" \
+    "the deferred stage did not run the session-start reconciliation tick"
+  assert_not_contains "$report_out" "RECONCILIATION_ERROR" \
+    "a successful deferred reconciliation was reported as failed"
+  pass "fm-startup-network: locked stage includes the session-start reconciliation tick"
+}
+
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
@@ -628,4 +655,5 @@ test_records_share_one_origin_so_offsets_form_a_timeline
 test_timings_are_published_and_only_the_on_demand_report_prints_them
 test_a_bounded_run_still_publishes_the_timings_it_managed_to_record
 test_the_timing_artifact_cannot_carry_a_command_line_or_forge_records
+test_locked_stage_runs_session_start_reconciliation_off_the_blocking_path
 echo "# fm-startup-network.test.sh: all assertions passed"
