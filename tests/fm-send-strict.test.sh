@@ -294,6 +294,33 @@ test_quota_policy_covers_pi_and_unknown_endpoints() {
   pass "quota-aware sends cover Pi Codex models and unknown explicit endpoints"
 }
 
+test_endpoint_meta_override_keeps_target_identity_narrow() {
+  local dir fb home err log meta rc
+  dir="$TMP_ROOT/endpoint-override"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home endpointoverride); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  mkdir -p "$home/state/parent-route"
+  meta="$home/state/parent-route/route.meta"
+  fm_write_meta "$meta" "window=sess:fm-route" "worktree=$home" "project=$home" "kind=secondmate" "harness=codex" "model=gpt-5.6-sol"
+  enable_quota_policy "$home"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_SEND_ENDPOINT_META_OVERRIDE="$meta" FM_FAKE_CODEX_REMAINING=100 FM_SEND_SETTLE=0 \
+    "$SEND" sess:fm-route "continue remotely" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "an exact endpoint metadata override should resolve its recorded target"
+  assert_contains "$(cat "$log")" "target=sess:fm-route literal=1 arg=continue remotely" \
+    "the endpoint override did not preserve the remote target identity"
+
+  : > "$log"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_SEND_ENDPOINT_META_OVERRIDE="$meta" FM_FAKE_CODEX_REMAINING=100 FM_SEND_SETTLE=0 \
+    "$SEND" sess:fm-other "wrong route" >/dev/null 2>"$err"; rc=$?
+  expect_code 1 "$rc" "an endpoint metadata override should reject a different requested target"
+  assert_contains "$(cat "$err")" "binds 'sess:fm-route', not requested target 'sess:fm-other'" \
+    "the mismatched override refusal did not name both targets"
+  [ ! -s "$log" ] || fail "a mismatched endpoint metadata override still attempted delivery"
+  pass "fm-send endpoint metadata overrides bind only their exact target"
+}
+
 # A --key send is how firstmate interrupts a worker, so its exit status is the
 # only signal that the interrupt actually landed.
 # Reporting success for a key that was never delivered would leave supervision
@@ -332,3 +359,4 @@ test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
 test_codex_quota_reserve_drains_at_text_checkpoint
 test_quota_policy_covers_pi_and_unknown_endpoints
+test_endpoint_meta_override_keeps_target_identity_narrow

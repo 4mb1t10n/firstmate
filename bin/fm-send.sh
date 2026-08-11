@@ -82,6 +82,7 @@ if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
 fi
 
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+ENDPOINT_META_OVERRIDE=${FM_SEND_ENDPOINT_META_OVERRIDE:-}
 if [ ! -d "$FM_HOME" ]; then
   echo "error: FM_HOME '$FM_HOME' is not a directory; fm-send cannot resolve this home's state" >&2
   exit 1
@@ -151,13 +152,13 @@ fm_send_record_interrupt() {  # <key>
   case "$TARGET_HARNESS" in claude*) : ;; *) return 0 ;; esac
   [ -n "$TARGET_META" ] || return 0
   id=$(fm_send_id_from_meta "$TARGET_META")
-  [ -f "$STATE/$id.busy-gen" ] || return 0
+  [ -f "$TARGET_STATE/$id.busy-gen" ] || return 0
   gen=$(fm_meta_get "$TARGET_META" busy_gen)
   if [ -n "$gen" ]; then
-    "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
+    "$FM_ROOT/bin/fm-busy-event.sh" apply "$TARGET_STATE" "$id" idle \
       --gen "$gen" --source fm-interrupt --event interrupt
   else
-    "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
+    "$FM_ROOT/bin/fm-busy-event.sh" apply "$TARGET_STATE" "$id" idle \
       --current-gen --source fm-interrupt --event interrupt
   fi || {
     echo "error: key '$key' reached $T, but the Claude interrupt state could not be recorded for $id" >&2
@@ -192,9 +193,39 @@ fm_send_resolve_target() {  # <raw-target>
   TARGET_MODEL=""
   EXPECTED_LABEL=""
   TARGET_META=""
+  TARGET_STATE=$STATE
   TARGET_SELECTOR=""
   TARGET_REMOTE_ID=""
   RESOLUTION_TRIED=""
+
+  if [ -n "$ENDPOINT_META_OVERRIDE" ]; then
+    case "$ENDPOINT_META_OVERRIDE" in
+      /*.meta) ;;
+      *)
+        echo "error: endpoint metadata override must be an absolute .meta path" >&2
+        return 1
+        ;;
+    esac
+    id=$(fm_send_id_from_meta "$ENDPOINT_META_OVERRIDE")
+    if ! fm_backend_validate_task_endpoint "$ENDPOINT_META_OVERRIDE" "$id"; then
+      echo "error: endpoint metadata override '$ENDPOINT_META_OVERRIDE' is invalid" >&2
+      return 1
+    fi
+    target=$FM_BACKEND_VALIDATED_TARGET
+    backend=$FM_BACKEND_VALIDATED_BACKEND
+    if [ "$target" != "$raw" ]; then
+      echo "error: endpoint metadata override '$ENDPOINT_META_OVERRIDE' binds '$target', not requested target '$raw'" >&2
+      return 1
+    fi
+    RESOLVED_TARGET=$target
+    TARGET_BACKEND=$backend
+    TARGET_META=$ENDPOINT_META_OVERRIDE
+    TARGET_STATE=${ENDPOINT_META_OVERRIDE%/*}
+    TARGET_HARNESS=$(fm_meta_get "$TARGET_META" harness)
+    TARGET_MODEL=$(fm_meta_get "$TARGET_META" model)
+    RESOLUTION_TRIED="explicit endpoint metadata=$TARGET_META; backend=$TARGET_BACKEND"
+    return 0
+  fi
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
   if [ -n "$meta" ]; then

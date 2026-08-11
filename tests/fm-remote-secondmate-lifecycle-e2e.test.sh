@@ -878,6 +878,7 @@ pass "remote spawn serializes inheritance through launch publication"
 # and resolves only after the correlated remote log delta is ingested.
 printf '%s\n' '{"version":1,"codex":{"worker_minimum_percent_remaining":20,"active_worker_action":"drain-at-checkpoint"},"telemetry":{"maximum_snapshot_age_seconds":300,"stale_behavior":"deny"}}' \
   > "$REMOTE_HOME/config/quota-policy.json"
+publish_healthy_watcher_identity "$REMOTE_HOME/state" "$REMOTE_HOME" "$REMOTE_ROOT/bin/fm-watch.sh"
 ssh_before_send=$(cat "$SSH_COUNT")
 set +e
 FM_FAKE_SSH_MODE=ambiguous remote_env "$ROOT/bin/fm-send.sh" fm-ios \
@@ -886,6 +887,8 @@ send_rc=$?
 set -e
 [ "$send_rc" -ne 0 ] || fail "ambiguous remote send claimed definite delivery"
 assert_grep 'do not resend' "$TMP_ROOT/send.err" "ambiguous remote send did not require same-host reconciliation"
+assert_no_grep 'WATCHER DOWN - SUPERVISION IS OFF' "$TMP_ROOT/send.out" \
+  "remote send checked endpoint metadata storage instead of the secondmate supervision state"
 ssh_after_send=$(cat "$SSH_COUNT")
 [ "$ssh_after_send" -eq $((ssh_before_send + 1)) ] || fail "ambiguous remote send was retried"
 CORR=$(grep -Eo 'corr=[a-f0-9]{16}' "$HERDR_LOG" | tail -1 | cut -d= -f2-)
@@ -903,7 +906,18 @@ assert_grep "done [corr=$CORR]: remote build passed" "$PARENT/state/ios.status" 
 phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
 [ "$phase" = resolved ] || fail "correlated remote reply did not resolve the parent expectation"
 pass "marked send and routed reply complete through the existing parent correlation owner"
+fm_write_meta "$REMOTE_HOME/state/guard-probe.meta" "window=fixture:fm-guard-probe" "kind=ship"
+printf 'fixture wake\n' > "$REMOTE_HOME/state/.wake-queue"
+remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh key ios Escape \
+  > "$TMP_ROOT/remote-key-guard.out" 2> "$TMP_ROOT/remote-key-guard.err" \
+  || fail "remote interrupt failed while checking secondmate supervision state"
+assert_grep 'queued wakes pending' "$TMP_ROOT/remote-key-guard.err" \
+  "remote key did not inspect the secondmate home queue"
+assert_no_grep 'WATCHER DOWN - SUPERVISION IS OFF' "$TMP_ROOT/remote-key-guard.out" \
+  "remote key ignored the healthy secondmate watcher identity"
 rm -f "$REMOTE_HOME/config/quota-policy.json"
+rm -f "$REMOTE_HOME/state/guard-probe.meta"
+rm -f "$REMOTE_HOME/state/.wake-queue"
 rm -f "$PARENT/state/.wake-queue"
 
 printf '{"revision":2}\n' > "$PARENT/config/crew-dispatch.json"
