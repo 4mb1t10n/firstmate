@@ -108,6 +108,8 @@ fi
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -324,15 +326,36 @@ fm_send_resolve_target() {  # <raw-target>
   return 1
 }
 
+SEND_CONTROL_LOCK=
+SEND_CONTROL_LOCK_HELD=0
+
+fm_send_cleanup() {
+  local status=$?
+  if [ "$SEND_CONTROL_LOCK_HELD" = 1 ]; then
+    SEND_CONTROL_LOCK_HELD=0
+    fm_lock_release "$SEND_CONTROL_LOCK" || true
+  fi
+  return "$status"
+}
+
+fm_send_lock_submission_target() {
+  local initial_meta=$TARGET_META id lock_dir
+  [ -n "$initial_meta" ] || return 0
+  id=$(fm_send_id_from_meta "$initial_meta")
+  lock_dir=${initial_meta%/*}
+  [ -n "$lock_dir" ] || lock_dir=/
+  SEND_CONTROL_LOCK="$lock_dir/.control-$id.lock"
+  fm_lock_acquire_wait "$SEND_CONTROL_LOCK" || return 1
+  SEND_CONTROL_LOCK_HELD=1
+  fm_send_resolve_target "$RAW_TARGET" || return 1
+  if [ "$TARGET_META" != "$initial_meta" ]; then
+    echo "error: target '$RAW_TARGET' changed lifecycle ownership during delivery; retry against its current task metadata" >&2
+    return 1
+  fi
+}
+
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
-T=$RESOLVED_TARGET
-TARGET_QUOTA_IDENTITY=
-TARGET_QUOTA_TURN_GATE=
-if [ -n "$TARGET_META" ]; then
-  TARGET_QUOTA_IDENTITY=$(fm_meta_get "$TARGET_META" quota_identity)
-  TARGET_QUOTA_TURN_GATE=$(fm_meta_get "$TARGET_META" quota_turn_gate)
-fi
 shift
 
 # Collect --resolve-key flags (answerer-closes; see the header contract). They
@@ -369,6 +392,30 @@ while :; do
     *) break ;;
   esac
 done
+
+semantic_key=
+if [ "${1:-}" = "--key" ]; then
+  [ $# -ge 2 ] || { echo "error: --key requires a key" >&2; exit 1; }
+  [ -z "$RESOLVE_KEYS" ] || {
+    echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
+    exit 1
+  }
+  semantic_key=$(fm_send_normalize_key "$2")
+fi
+
+trap fm_send_cleanup EXIT
+case "$semantic_key" in
+  Escape|C-c|C-u) ;;
+  *) fm_send_lock_submission_target || exit 1 ;;
+esac
+
+T=$RESOLVED_TARGET
+TARGET_QUOTA_IDENTITY=
+TARGET_QUOTA_TURN_GATE=
+if [ -n "$TARGET_META" ]; then
+  TARGET_QUOTA_IDENTITY=$(fm_meta_get "$TARGET_META" quota_identity)
+  TARGET_QUOTA_TURN_GATE=$(fm_meta_get "$TARGET_META" quota_turn_gate)
+fi
 
 if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
@@ -451,14 +498,7 @@ fm_send_close_resolved_keys() {  # <answer-text>
 # error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then
-  case "$*" in
-    *--resolve-key*)
-      echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
-      exit 1
-      ;;
-  esac
   key=$2
-  semantic_key=$(fm_send_normalize_key "$key")
   case "$semantic_key" in
     Escape|C-c|C-u) ;;
     *) "$SCRIPT_DIR/fm-codex-quota-gate.sh" delivery "$TARGET_HARNESS" "${TARGET_MODEL:-default}" "$TARGET_QUOTA_IDENTITY" "$TARGET_QUOTA_TURN_GATE" || exit 1 ;;

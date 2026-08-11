@@ -86,6 +86,12 @@ SH
 #!/usr/bin/env bash
 set -u
 remaining=${FM_FAKE_CODEX_REMAINING:-100}
+if [ -n "${FM_FAKE_QUOTA_ENTERED:-}" ]; then
+  : > "$FM_FAKE_QUOTA_ENTERED"
+  while [ ! -e "$FM_FAKE_QUOTA_RELEASE" ]; do
+    /bin/sleep 0.01
+  done
+fi
 jq -n --argjson remaining "$remaining" --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
   {
     schemaVersion: 3,
@@ -355,6 +361,45 @@ test_quota_policy_refuses_unproven_legacy_metadata() {
   pass "quota-aware sends require proven endpoint launch provenance"
 }
 
+test_submitting_delivery_holds_the_task_lifecycle_lock() {
+  local dir fb home err log entered release sender send_rc lock_rc
+  dir="$TMP_ROOT/lifecycle-lock"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home lifecyclelock); err="$dir/send.err"; log="$dir/tmux.log"
+  entered="$dir/quota.entered"; release="$dir/quota.release"; : > "$log"
+  enable_quota_policy "$home"
+  fm_write_meta "$home/state/lane-race.meta" "window=sess:fm-lane-race" "kind=ship" "harness=pi" "model=openai-codex/gpt-5.6-sol" "quota_identity=structured" "quota_turn_gate=before-agent-start"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_CODEX_REMAINING=21 FM_FAKE_QUOTA_ENTERED="$entered" \
+    FM_FAKE_QUOTA_RELEASE="$release" FM_SEND_SETTLE=0 \
+    "$SEND" lane-race "continue after drain" >/dev/null 2>"$err" &
+  sender=$!
+  for _ in $(seq 1 200); do
+    [ -e "$entered" ] && break
+    /bin/sleep 0.01
+  done
+  [ -e "$entered" ] || { kill "$sender" 2>/dev/null || true; fail "send did not reach its quota checkpoint"; }
+
+  lock_rc=0
+  STATE="$home/state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then
+      fm_lock_release "$2"
+      exit 0
+    fi
+    exit 1
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/.control-lane-race.lock" || lock_rc=$?
+  : > "$release"
+  send_rc=0
+  wait "$sender" || send_rc=$?
+
+  expect_code 1 "$lock_rc" "a relaunch must not acquire the task lock during submission authorization"
+  expect_code 0 "$send_rc" "the authorized Pi continuation should still be delivered"
+  assert_contains "$(cat "$log")" "arg=continue after drain" \
+    "the lifecycle-locked continuation did not reach the endpoint"
+  pass "fm-send submission stays atomic with task lifecycle changes"
+}
+
 # A --key send is how firstmate interrupts a worker, so its exit status is the
 # only signal that the interrupt actually landed.
 # Reporting success for a key that was never delivered would leave supervision
@@ -395,3 +440,4 @@ test_native_codex_policy_preserves_only_control_keys
 test_quota_policy_covers_pi_and_unknown_endpoints
 test_endpoint_meta_override_keeps_target_identity_narrow
 test_quota_policy_refuses_unproven_legacy_metadata
+test_submitting_delivery_holds_the_task_lifecycle_lock
