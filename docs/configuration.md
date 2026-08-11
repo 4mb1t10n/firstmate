@@ -306,7 +306,7 @@ An acknowledgement that exceeds the grace interval changes reconciliation health
 
 ## Codex quota reserve (config/quota-policy.json)
 
-`config/quota-policy.json` is an optional local, gitignored policy that protects a captain-selected Codex reserve at the concrete worker boundary.
+`config/quota-policy.json` is an optional local, gitignored policy that protects a fixed 20 percent Codex reserve at the concrete worker boundary.
 `FM_QUOTA_POLICY_PATH` may point at the same policy outside the FirstMate checkout for a declarative fleet deployment.
 Inheritance materializes the resolved override into each secondmate home's `config/quota-policy.json`, and the nested home reads that local copy.
 When present, the policy makes `fm-spawn.sh` refuse every raw launch command because Firstmate cannot verify which provider arbitrary shell text will run.
@@ -315,6 +315,7 @@ Each new endpoint records whether its adapter identity was structured and whethe
 When the policy is enabled, an existing endpoint without that provenance, including a raw endpoint created before policy activation, must be relaunched through a verified adapter before it accepts text or a submitting key.
 For structured spawns and relaunches that consume Codex quota, `fm-spawn.sh` takes a fresh `quota-axi --json` snapshot before the worker starts.
 `fm-send.sh` classifies every text steer and submitting key before delivery.
+The lifecycle serialization that keeps quota admission and delivery bound to the same endpoint incarnation is owned by [`docs/agent-control.md`](agent-control.md).
 Native Codex has no verified idle or turn-start boundary, and user text can queue behind an in-flight checkpoint, so enabling the policy refuses every text or submitting-key delivery to native Codex even above the reserve.
 Use a Pi-family Codex profile when later text continuations are required because its `before_agent_start` hook rechecks the live model and quota at the actual turn boundary.
 Internal Pi watcher and turn-end follow-ups and away-mode supervisor injections pass through the same worker gate in secondmate homes, while the captain brain remains outside this worker reserve.
@@ -348,8 +349,8 @@ Secondmate homes inherit the policy so nested crews cannot bypass the reserve.
 }
 ```
 
-The brain handoff, fallback-selection, context-compaction, and polling fields document the full captain policy used by a compatible orchestrator such as First Mate Polly.
-The deterministic FirstMate shell boundary owns only the Codex worker reserve and active-worker checkpoint behavior.
+The deterministic FirstMate shell boundary requires `version` 1, exactly 20 for `worker_minimum_percent_remaining`, `drain-at-checkpoint` for `active_worker_action`, a positive integer `maximum_snapshot_age_seconds`, and `deny` for `stale_behavior`.
+The brain handoff, fallback-selection, context-compaction, and polling fields document the rest of the captain policy for a compatible orchestrator such as First Mate Polly; the shell boundary does not enforce them.
 
 ## Toolchain
 

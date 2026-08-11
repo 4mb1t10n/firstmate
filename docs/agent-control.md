@@ -11,6 +11,11 @@ The split exists because the data plane's marking is exactly right for a message
 A routing-marked `/quit` arrives as ordinary chat - `[fm-from-firstmate] /quit` - which the agent reasons about instead of executing.
 The failure repeated across harnesses and homes, and the workaround (remember to use an unmarked send for agent-control commands, and improvise the right key or command per harness) lived only in agent prose, so it failed again every time a session did not happen to recall it.
 
+For a recorded task, submitting data-plane operations and lifecycle changes share one per-task serialization boundary even though their payload channels remain separate.
+A text or submitting-key send re-resolves the target after acquiring that boundary and holds it through quota admission and confirmed delivery, while spawn and relaunch hold the same boundary through endpoint publication and launch.
+This prevents input admitted for one agent incarnation from landing in its replacement.
+Escape, Ctrl+C, and Ctrl+U bypass the boundary so an in-flight worker can still be interrupted or its composer cleared during a lifecycle transition.
+
 ## What the control plane owns
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, with no side effects, so it can be read as a contract:

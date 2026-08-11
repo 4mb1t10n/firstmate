@@ -13,6 +13,10 @@
 # launch provenance, and a Codex consumer also requires a verified turn-start
 # recheck. Native Codex has no such boundary, so its text and Enter deliveries
 # are refused while non-submitting controls remain usable.
+# Recorded submissions hold the task's lifecycle boundary from a metadata
+# re-resolution through quota admission and confirmed delivery, so checked input
+# cannot cross into a replacement endpoint. Escape, Ctrl+C, and Ctrl+U remain
+# outside that boundary so interruption and composer clearing stay available.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the target backend confirms a
