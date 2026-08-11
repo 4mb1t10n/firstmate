@@ -66,7 +66,7 @@ while IFS= read -r rel; do
     esac
   fi
   case "$rel" in
-    config/*) source="$CONFIG/${rel#config/}" ;;
+    config/*) source=$(fm_config_inherit_source_path "$CONFIG" "${rel#config/}") ;;
     data/*) source="$DATA/${rel#data/}" ;;
   esac
   if [ -e "$source" ] || [ -L "$source" ]; then

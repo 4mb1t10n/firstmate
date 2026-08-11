@@ -120,6 +120,28 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/quota-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+remaining=${FM_FAKE_CODEX_REMAINING:-100}
+jq -n --argjson remaining "$remaining" --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  {
+    schemaVersion: 3,
+    providers: [{
+      provider: "codex",
+      state: {status: "fresh", stale: false, refreshedAt: $refreshed},
+      quotaSemantics: {
+        status: "known",
+        effectiveAvailability: [{
+          scope: "all_models",
+          status: "known",
+          effectivePercentRemaining: $remaining
+        }]
+      }
+    }]
+  }'
+SH
+  chmod +x "$fb/quota-axi"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
@@ -158,6 +180,13 @@ add_ship_task() {
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
   TASK_TMPS+=("/tmp/fm-$id")
+}
+
+enable_quota_policy() {
+  local home=$1
+  mkdir -p "$home/config"
+  printf '%s\n' '{"version":1,"codex":{"worker_minimum_percent_remaining":20,"active_worker_action":"drain-at-checkpoint"},"telemetry":{"maximum_snapshot_age_seconds":300,"stale_behavior":"deny"}}' \
+    > "$home/config/quota-policy.json"
 }
 
 run_control() {  # <case-dir> <args...>
@@ -406,6 +435,36 @@ test_relaunch_requires_a_note_for_a_ship_task() {
   [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch must not stop the agent"
   pass "fm-control relaunch: a ship task refuses without the progress note its replacement needs"
+}
+
+test_quota_refusal_preserves_the_running_agent_and_records() {
+  local dir out rc meta brief
+  dir=$(new_case quota-refusal rlquota)
+  add_ship_task "$dir" rlquota claude
+  enable_quota_policy "$dir/home"
+  meta="$dir/home/state/rlquota.meta"
+  brief="$dir/home/data/rlquota/brief.md"
+  cp "$meta" "$dir/meta.before"
+  cp "$brief" "$dir/brief.before"
+  printf codex > "$dir/fake/becomes"
+
+  export FM_FAKE_CODEX_REMAINING=20
+  out=$(run_control "$dir" rlquota relaunch --harness codex --note "continue on Codex"); rc=$?
+  unset FM_FAKE_CODEX_REMAINING
+
+  expect_code 1 "$rc" "a Codex relaunch at the reserve should be refused"
+  assert_contains "$out" "20% remaining" "the relaunch refusal did not report the protected reserve"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a quota-refused relaunch stopped the existing agent"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a quota-refused relaunch changed task metadata"
+  cmp -s "$brief" "$dir/brief.before" \
+    || fail "a quota-refused relaunch changed the worker instructions"
+  [ ! -e "$dir/home/state/rlquota.control-relaunch" ] \
+    || fail "a quota-refused relaunch created a transaction journal"
+  [ ! -s "$dir/fake/literal" ] && [ ! -s "$dir/fake/keys" ] \
+    || fail "a quota-refused relaunch delivered lifecycle input"
+  pass "fm-control relaunch checks Codex quota before mutation or exit"
 }
 
 # --- 2. harness switch -------------------------------------------------------
@@ -1305,6 +1364,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
+test_quota_refusal_preserves_the_running_agent_and_records
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness

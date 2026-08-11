@@ -65,6 +65,15 @@ FM_SHARED_CAPTAIN_MODE="444"
 # environment only in tests. Items must not contain whitespace.
 FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness quota-policy.json backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context}"
 
+fm_config_inherit_source_path() {
+  local src_config=$1 item=$2
+  if [ "$item" = quota-policy.json ] && [ -n "${FM_QUOTA_POLICY_PATH:-}" ]; then
+    printf '%s\n' "$FM_QUOTA_POLICY_PATH"
+  else
+    printf '%s/%s\n' "$src_config" "$item"
+  fi
+}
+
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
 # the primary also hands the new process its frozen on/off decision, and left
@@ -452,8 +461,17 @@ propagate_inheritable_config() {
       record_inheritable_config_result "$item" unchanged "session-scoped"
       continue
     fi
-    src="$src_config/$item"
+    src=$(fm_config_inherit_source_path "$src_config" "$item")
     dest="$dest_config/$item"
+    if [ "$item" = quota-policy.json ] && { [ -e "$src" ] || [ -L "$src" ]; }; then
+      if [ ! -f "$src" ] || [ -L "$src" ]; then
+        reason="unsafe primary quota policy source"
+        warn_inheritable_config_error "$item" "$src" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      fi
+    fi
     # This one scalar config is consumed as a local safety boundary, so reject
     # every unsafe or malformed source/destination artifact before the generic
     # byte-copy behavior below can treat it as ordinary inherited material.

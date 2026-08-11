@@ -790,6 +790,8 @@ do_relaunch() {
       ;;
   esac
 
+  "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker "$TARGET_HARNESS" "$TARGET_MODEL" || return 1
+
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
   else

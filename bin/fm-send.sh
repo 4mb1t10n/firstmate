@@ -187,6 +187,7 @@ fm_send_resolve_target() {  # <raw-target>
   RESOLVED_TARGET=""
   TARGET_BACKEND=""
   TARGET_HARNESS=""
+  TARGET_MODEL=""
   EXPECTED_LABEL=""
   TARGET_META=""
   TARGET_SELECTOR=""
@@ -201,6 +202,7 @@ fm_send_resolve_target() {  # <raw-target>
       TARGET_BACKEND=remote
       TARGET_META=$meta
       TARGET_HARNESS=$(fm_meta_get "$meta" harness)
+      TARGET_MODEL=$(fm_meta_get "$meta" model)
       EXPECTED_LABEL="fm-$id"
       TARGET_SELECTOR=1
       TARGET_REMOTE_ID=$id
@@ -218,6 +220,7 @@ fm_send_resolve_target() {  # <raw-target>
     TARGET_BACKEND=$backend
     TARGET_META=$meta
     TARGET_HARNESS=$(fm_meta_get "$meta" harness)
+    TARGET_MODEL=$(fm_meta_get "$meta" model)
     EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$raw" "$STATE")
     TARGET_SELECTOR=1
     return 0
@@ -256,6 +259,7 @@ fm_send_resolve_target() {  # <raw-target>
     TARGET_BACKEND=$(fm_backend_of_meta "$meta")
     TARGET_META=$meta
     TARGET_HARNESS=$(fm_meta_get "$meta" harness)
+    TARGET_MODEL=$(fm_meta_get "$meta" model)
     RESOLUTION_TRIED="explicit target '$raw' matched $meta; backend=$TARGET_BACKEND"
     return 0
   fi
@@ -393,8 +397,8 @@ fm_send_close_resolved_keys() {  # <answer-text>
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
 # scope the codex `$<skill>` popup-settle below. A task selector carries
-# meta; an explicit backend-target escape hatch has none, so its harness is
-# unknown and treated as non-codex (the safe default that keeps the fast path).
+# meta; an explicit backend-target escape hatch has none, so submitting input
+# is refused when the optional quota policy makes that missing identity unsafe.
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
 # Do not add a separate passive liveness preflight here. Active send paths own
@@ -412,6 +416,9 @@ if [ "${1:-}" = "--key" ]; then
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
+  if [ "$semantic_key" = Enter ]; then
+    "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker "$TARGET_HARNESS" "${TARGET_MODEL:-default}" || exit 1
+  fi
   if [ "$TARGET_BACKEND" = remote ]; then
     if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" < /dev/null; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
@@ -430,9 +437,7 @@ else
   # is reached. This is the active-worker drain checkpoint: the in-flight turn
   # finishes, while retries, reviews, and follow-up steers move to another
   # harness.
-  if [ "$TARGET_HARNESS" = codex ]; then
-    "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker || exit 1
-  fi
+  "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker "$TARGET_HARNESS" "${TARGET_MODEL:-default}" || exit 1
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE

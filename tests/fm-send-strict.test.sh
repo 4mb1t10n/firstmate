@@ -229,7 +229,7 @@ test_codex_quota_reserve_drains_at_text_checkpoint() {
   local dir fb home err log rc
   dir="$TMP_ROOT/codex-drain"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home codexdrain); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
-  fm_write_meta "$home/state/lane-drain.meta" "window=sess:fm-lane-drain" "kind=ship" "harness=codex"
+  fm_write_meta "$home/state/lane-drain.meta" "window=sess:fm-lane-drain" "kind=ship" "harness=codex" "model=gpt-5.6"
   enable_quota_policy "$home"
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
@@ -242,11 +242,47 @@ test_codex_quota_reserve_drains_at_text_checkpoint() {
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
     FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
+    "$SEND" lane-drain --key Enter >/dev/null 2>"$err"; rc=$?
+  expect_code 1 "$rc" "Enter should not bypass the Codex reserve"
+  [ ! -s "$log" ] || fail "a denied Codex Enter still reached the endpoint"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
     "$SEND" lane-drain --key Escape >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "a control key should remain available at the Codex reserve"
   assert_contains "$(cat "$log")" "arg=Escape" \
     "the control key did not reach the draining Codex worker"
   pass "Codex workers drain at the text-turn checkpoint while control keys remain available"
+}
+
+test_quota_policy_covers_pi_and_unknown_endpoints() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/quota-identities"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home quotaidentities); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  enable_quota_policy "$home"
+  fm_write_meta "$home/state/lane-pi.meta" "window=sess:fm-lane-pi" "kind=ship" "harness=pi" "model=openai-codex/gpt-5.6-sol"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
+    "$SEND" lane-pi "start another turn" >/dev/null 2>"$err"; rc=$?
+  expect_code 1 "$rc" "Pi using an openai-codex model should respect the reserve"
+  [ ! -s "$log" ] || fail "a denied Pi Codex text turn still reached the endpoint"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_CODEX_REMAINING=100 FM_SEND_SETTLE=0 \
+    "$SEND" sess:outside "unclassified turn" >/dev/null 2>"$err"; rc=$?
+  expect_code 1 "$rc" "text to an endpoint without harness identity should be denied under the policy"
+  assert_contains "$(cat "$err")" "quota consumption is ambiguous" \
+    "the explicit-endpoint refusal did not name its missing quota identity"
+  [ ! -s "$log" ] || fail "an ambiguous explicit-endpoint text turn still reached the endpoint"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
+    "$SEND" sess:outside --key Escape >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a non-submitting interrupt should remain available on an explicit endpoint"
+  assert_contains "$(cat "$log")" "arg=Escape" \
+    "the explicit-endpoint interrupt did not reach the worker"
+  pass "quota-aware sends cover Pi Codex models and unknown explicit endpoints"
 }
 
 # A --key send is how firstmate interrupts a worker, so its exit status is the
@@ -286,3 +322,4 @@ test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
 test_codex_quota_reserve_drains_at_text_checkpoint
+test_quota_policy_covers_pi_and_unknown_endpoints

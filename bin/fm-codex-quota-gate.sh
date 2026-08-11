@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Enforce the captain's Codex reserve before a worker starts another turn.
-# Usage: fm-codex-quota-gate.sh [worker]
+# Usage: fm-codex-quota-gate.sh [worker [harness [model]]]
 #
 # Silent success means the optional policy is absent or current Codex
 # availability is above its configured reserve. Every configured uncertainty
@@ -13,12 +13,45 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 POLICY="${FM_QUOTA_POLICY_PATH:-$CONFIG/quota-policy.json}"
 ROLE=${1:-worker}
+HARNESS=codex
+MODEL=default
+[ "$#" -lt 2 ] || HARNESS=$2
+[ "$#" -lt 3 ] || MODEL=$3
 
 [ "$ROLE" = worker ] || {
   echo "error: quota gate role must be worker" >&2
   exit 2
 }
-[ -e "$POLICY" ] || exit 0
+[ "$#" -le 3 ] || {
+  echo "error: quota gate accepts worker, harness, and model only" >&2
+  exit 2
+}
+[ -e "$POLICY" ] || [ -L "$POLICY" ] || exit 0
+
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
+
+if [ "$MODEL" = "${MODEL#openai-codex/}" ]; then
+  family=$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)
+  case "$family" in
+    codex) ;;
+    pi|pi-signed)
+      case "$MODEL" in
+        */?*) exit 0 ;;
+        *)
+          echo "error: Codex worker denied because quota consumption is ambiguous for harness '$HARNESS' model '$MODEL'" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    claude|opencode|grok|kimi|muse) exit 0 ;;
+    *)
+      echo "error: Codex worker denied because quota consumption is ambiguous for harness '${HARNESS:-unknown}' model '${MODEL:-default}'" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 [ -f "$POLICY" ] && [ ! -L "$POLICY" ] || {
   echo "error: Codex worker denied because $POLICY is not a regular policy file" >&2
   exit 1
@@ -34,7 +67,7 @@ command -v quota-axi >/dev/null 2>&1 || {
 
 if ! jq -e '
   .version == 1
-  and (.codex.worker_minimum_percent_remaining | type == "number" and . >= 0 and . <= 100)
+  and (.codex.worker_minimum_percent_remaining == 20)
   and (.codex.active_worker_action == "drain-at-checkpoint")
   and (.telemetry.maximum_snapshot_age_seconds | type == "number" and . > 0 and floor == .)
   and (.telemetry.stale_behavior == "deny")

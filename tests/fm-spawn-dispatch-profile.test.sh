@@ -794,6 +794,75 @@ test_codex_quota_reserve_allows_spawn_above_cutoff() {
   pass "Codex quota reserve remains available above the cutoff"
 }
 
+test_pi_codex_profile_respects_quota_reserve() {
+  local rec id out status
+  id=profile-pi-codex-reserve-z20
+  rec=$(make_spawn_case profile-pi-codex-reserve pi "$id")
+  read_case_record "$rec"
+  enable_quota_policy "$HOME_DIR"
+
+  export FM_FAKE_CODEX_REMAINING=20
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model openai-codex/gpt-5.6-sol --effort max)
+  status=$?
+  unset FM_FAKE_CODEX_REMAINING
+
+  expect_code 1 "$status" "Pi using an openai-codex model should be denied at the reserve"
+  assert_contains "$out" "20% remaining" \
+    "the Pi Codex profile did not reach the quota-consumer boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "a denied Pi Codex profile published task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a denied Pi Codex profile typed a launch command"
+  pass "Pi openai-codex profiles respect the Codex quota reserve"
+}
+
+test_raw_env_codex_launch_respects_quota_reserve() {
+  local rec id out status
+  id=profile-raw-codex-reserve-z21
+  rec=$(make_spawn_case profile-raw-codex-reserve claude "$id")
+  read_case_record "$rec"
+  enable_quota_policy "$HOME_DIR"
+
+  export FM_FAKE_CODEX_REMAINING=20
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "env codex")
+  status=$?
+  unset FM_FAKE_CODEX_REMAINING
+
+  expect_code 1 "$status" "an env-wrapped raw Codex launch should be denied at the reserve"
+  assert_contains "$out" "20% remaining" \
+    "the env-wrapped Codex command was not classified as Codex quota consumption"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "a denied raw Codex launch published task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a denied raw Codex launch typed a launch command"
+  pass "env-wrapped raw Codex launches respect the quota reserve"
+}
+
+test_secondmate_uses_materialized_quota_policy() {
+  local rec id sm override out status launch
+  id=profile-secondmate-quota-override-z22
+  rec=$(make_spawn_case profile-secondmate-quota-override codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  override="$CASE_DIR/declarative/quota-policy.json"
+  mkdir -p "${override%/*}"
+  printf '%s\n' '{"version":1,"codex":{"worker_minimum_percent_remaining":20,"active_worker_action":"drain-at-checkpoint"},"telemetry":{"maximum_snapshot_age_seconds":300,"stale_behavior":"deny"}}' > "$override"
+
+  out=$(FM_QUOTA_POLICY_PATH="$override" FM_FAKE_CODEX_REMAINING=21 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+
+  expect_code 0 "$status" "a secondmate should launch above the reserve from an override policy"
+  cmp -s "$override" "$sm/config/quota-policy.json" \
+    || fail "the resolved quota-policy override was not copied into the secondmate home"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_QUOTA_POLICY_PATH=" \
+    "the secondmate launch did not clear the parent-only override path"
+  assert_contains "$out" "spawned $id harness=codex kind=secondmate" \
+    "the secondmate did not launch after policy materialization"
+  pass "secondmates read the inherited local quota policy"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
@@ -823,5 +892,8 @@ test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_codex_quota_reserve_blocks_spawn_before_publication
 test_codex_quota_reserve_allows_spawn_above_cutoff
+test_pi_codex_profile_respects_quota_reserve
+test_raw_env_codex_launch_respects_quota_reserve
+test_secondmate_uses_materialized_quota_policy
 
 echo "# all fm-spawn-dispatch-profile tests passed"

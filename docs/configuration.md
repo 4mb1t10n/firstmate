@@ -308,11 +308,13 @@ An acknowledgement that exceeds the grace interval changes reconciliation health
 
 `config/quota-policy.json` is an optional local, gitignored policy that protects a captain-selected Codex reserve at the concrete worker boundary.
 `FM_QUOTA_POLICY_PATH` may point at the same policy outside the FirstMate checkout for a declarative fleet deployment.
-When present, `fm-spawn.sh` takes a fresh `quota-axi --json` snapshot before every Codex spawn or relaunch, and `fm-send.sh` repeats the same gate before a text steer starts another Codex turn.
-Control keys remain available so an in-flight Codex turn can finish or be interrupted safely.
+Inheritance materializes the resolved override into each secondmate home's `config/quota-policy.json`, and the nested home reads that local copy.
+When present, `fm-spawn.sh` takes a fresh `quota-axi --json` snapshot before every spawn or relaunch whose resolved harness and model consume Codex quota, and `fm-send.sh` repeats the same gate before a text steer starts another Codex turn.
+Pi and Pi Signed profiles using an `openai-codex/*` model consume the protected quota, while a provider-unqualified Pi profile or an explicit endpoint without recorded harness identity is refused because its quota consumption cannot be proven.
+Non-submitting control keys remain available so an in-flight Codex turn can finish or be interrupted safely, but `Enter` is gated because it can submit pending composer text.
 At or below `worker_minimum_percent_remaining`, new Codex worker turns are refused and the first mate must resolve another task-compatible dispatch profile.
 Stale, malformed, missing, or older-schema telemetry fails closed for Codex workers.
-Other harnesses are not blocked by this file.
+Profiles conclusively mapped to other provider families are not blocked by this file.
 Secondmate homes inherit the policy so nested crews cannot bypass the reserve.
 
 ```json

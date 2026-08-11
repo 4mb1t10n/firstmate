@@ -452,13 +452,6 @@ spawn_remote_secondmate() {
       return 1
       ;;
   esac
-  if [ "$harness" = codex ]; then
-    "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker || {
-      fm_lock_release "$registry_lock" || true
-      fm_lock_release "$SPAWN_TASK_LOCK" || true
-      return 1
-    }
-  fi
   model=${MODEL:--}
   effort=${EFFORT:--}
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
@@ -471,6 +464,11 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
+  "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker "$harness" "${model#-}" || {
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
+  }
   # A remote second mate always runs on Herdr: its server belongs to the host's
   # own GUI login session, so the endpoint outlives every SSH connection that
   # supervises it. bin/fm-remote-doctor.sh gates that host on the same
@@ -1245,13 +1243,35 @@ launch_template() {
   esac
 }
 
+raw_launch_harness() {
+  local launch=$1 word env_mode=0 skip_env_arg=0
+  for word in $launch; do
+    if [ "$skip_env_arg" -eq 1 ]; then
+      skip_env_arg=0
+      continue
+    fi
+    if [ "$env_mode" -eq 1 ]; then
+      case "$word" in
+        [A-Za-z_]*=*) continue ;;
+        -u|--unset|-C|--chdir|-S|--split-string) skip_env_arg=1; continue ;;
+        --unset=*|--chdir=*|--split-string=*|-i|--ignore-environment|--null|-0|--) continue ;;
+      esac
+      basename -- "$word"
+      return 0
+    fi
+    case "$word" in
+      [A-Za-z_]*=*) continue ;;
+      env|*/env) env_mode=1 ;;
+      *) basename -- "$word"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    HARNESS=$(raw_launch_harness "$LAUNCH" 2>/dev/null || true)
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1307,14 +1327,6 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   exit 1
 fi
 
-# An explicit captain reserve is a concrete spawn safeguard, so it runs after
-# harness resolution and before project, worktree, metadata, or endpoint
-# mutation. Relaunches pass through the same gate and cannot silently resume a
-# Codex worker after the reserve has been reached.
-if [ "$HARNESS" = codex ]; then
-  "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker || exit 1
-fi
-
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
 # --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
@@ -1336,6 +1348,8 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     fi
   fi
 fi
+
+"$SCRIPT_DIR/fm-codex-quota-gate.sh" worker "$HARNESS" "${MODEL:-default}" || exit 1
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
@@ -2779,7 +2793,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_QUOTA_POLICY_PATH= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
