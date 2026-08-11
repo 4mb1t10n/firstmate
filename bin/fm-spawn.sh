@@ -946,6 +946,51 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+if [ "$RELAUNCH" -eq 0 ]; then
+  mkdir -p "$STATE" || {
+    echo "error: could not create parent state directory" >&2
+    exit 1
+  }
+  # A FRESH spawn changes which tasks this home has, so it must not interleave
+  # with a forced teardown that has already enumerated that set: a record
+  # published inside the enumerate-then-remove window is invisible to the
+  # teardown's per-task preflight but visible to its cleanup, and gets mutated
+  # while never lifecycle-locked (bin/fm-wake-lib.sh's fm_task_set_lock_path
+  # owns the evidence; bin/fm-teardown.sh holds the same lock from enumeration
+  # through cleanup). Taken before this task's own locks, matching the
+  # acquisition order documented there, and held through publication.
+  #
+  # A relaunch is exempt: it republishes a task that already exists, so it is
+  # already covered by that task's control lock, which the teardown preflight
+  # tests.
+  #
+  # Refusing rather than waiting is the fail-closed direction: the home may be
+  # moments from removal, so there is nothing worth waiting for.
+  SPAWN_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
+    echo "error: could not resolve the task-set lock for $STATE" >&2
+    exit 1
+  }
+  if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
+    echo "error: this home's task set is locked by another operation (a forced teardown is enumerating or removing its tasks); refusing to create task $ID rather than racing it" >&2
+    exit 1
+  fi
+  SPAWN_TASK_SET_LOCK_HELD=1
+fi
+SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
+control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
+if [ "$RELAUNCH" -eq 1 ] \
+  && [ "$control_owner" = "$PPID" ] \
+  && fm_pid_alive "$control_owner"; then
+  SPAWN_CONTROL_PARENT=1
+elif fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
+  SPAWN_CONTROL_LOCK_HELD=1
+else
+  echo "error: another lifecycle action is already running for task $ID" >&2
+  exit 1
+fi
+# Resource admission is serialized inside the same per-task lifecycle boundary
+# as fresh spawns, relaunches, and sends, so quota and capacity decisions cannot
+# race another action for this worker.
 # shellcheck source=bin/fm-resource-lib.sh
 . "$SCRIPT_DIR/fm-resource-lib.sh"
 if [ "$KIND" != secondmate ]; then
@@ -988,48 +1033,6 @@ if [ "$KIND" != secondmate ]; then
   RESOURCE_RESERVATION_ID=$ID
   RESOURCE_ADMISSION_LOCK_HELD=0
   fm_lock_release "$RESOURCE_ADMISSION_LOCK" || true
-fi
-if [ "$RELAUNCH" -eq 1 ]; then
-  SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
-  control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
-  if [ "$control_owner" = "$PPID" ] && fm_pid_alive "$control_owner"; then
-    SPAWN_CONTROL_PARENT=1
-  elif fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
-    SPAWN_CONTROL_LOCK_HELD=1
-  else
-    echo "error: another lifecycle action is already running for task $ID" >&2
-    exit 1
-  fi
-fi
-if [ "$RELAUNCH" -eq 0 ]; then
-  mkdir -p "$STATE" || {
-    echo "error: could not create parent state directory" >&2
-    exit 1
-  }
-  # A FRESH spawn changes which tasks this home has, so it must not interleave
-  # with a forced teardown that has already enumerated that set: a record
-  # published inside the enumerate-then-remove window is invisible to the
-  # teardown's per-task preflight but visible to its cleanup, and gets mutated
-  # while never lifecycle-locked (bin/fm-wake-lib.sh's fm_task_set_lock_path
-  # owns the evidence; bin/fm-teardown.sh holds the same lock from enumeration
-  # through cleanup). Taken before this task's own locks, matching the
-  # acquisition order documented there, and held through publication.
-  #
-  # A relaunch is exempt: it republishes a task that already exists, so it is
-  # already covered by that task's control lock, which the teardown preflight
-  # tests.
-  #
-  # Refusing rather than waiting is the fail-closed direction: the home may be
-  # moments from removal, so there is nothing worth waiting for.
-  SPAWN_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
-    echo "error: could not resolve the task-set lock for $STATE" >&2
-    exit 1
-  }
-  if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
-    echo "error: this home's task set is locked by another operation (a forced teardown is enumerating or removing its tasks); refusing to create task $ID rather than racing it" >&2
-    exit 1
-  fi
-  SPAWN_TASK_SET_LOCK_HELD=1
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then

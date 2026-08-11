@@ -405,6 +405,48 @@ test_sweep_respawns_authoritatively_missing_pi_secondmate() {
   pass "sweep: an authoritatively missing Pi secondmate window is relaunched"
 }
 
+test_sweep_recovery_respects_the_task_lifecycle_lock() {
+  local w fb tmuxfb log out lock ready release holder i=0
+  w=$(new_world sweep-lifecycle-lock)
+  add_sm_home "$w" sm1 firstmate:fm-sm1 pi
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  lock="$w/home/state/.control-sm1.lock"
+  ready="$w/control.ready"
+  release="$w/control.release"
+
+  (
+    STATE="$w/home/state"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    : > "$ready"
+    while [ ! -e "$release" ]; do
+      /bin/sleep 0.01
+    done
+    fm_lock_release "$lock"
+  ) &
+  holder=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "could not stage a held task lifecycle lock"
+  fi
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+  : > "$release"
+  wait "$holder" || fail "task lifecycle lock holder failed"
+
+  assert_contains "$out" "respawn failed after recorded endpoint confidently missing: error: another lifecycle action is already running for task sm1" \
+    "session recovery should refuse while submission owns the task lifecycle"
+  assert_not_contains "$(cat "$log")" "new-window" \
+    "session recovery replaced an endpoint during a serialized submission"
+  pass "sweep: recovery serializes with task submission lifecycle"
+}
+
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-missing-pi-signed)
@@ -547,6 +589,7 @@ test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
+test_sweep_recovery_respects_the_task_lifecycle_lock
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
