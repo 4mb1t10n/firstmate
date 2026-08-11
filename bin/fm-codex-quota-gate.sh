@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Enforce the captain's Codex reserve before a worker starts another turn.
-# Usage: fm-codex-quota-gate.sh [worker|continuation|unprotected [harness [model]]]
+# Usage: fm-codex-quota-gate.sh [worker|delivery|continuation|unprotected [harness [model]]]
 #
 # Silent success means the optional policy is absent, or the caller has a live
 # turn boundary and current Codex availability is above its configured reserve.
@@ -20,9 +20,9 @@ MODEL=default
 [ "$#" -lt 3 ] || MODEL=$3
 
 case "$ROLE" in
-  worker|continuation|unprotected) ;;
+  worker|delivery|continuation|unprotected) ;;
   *)
-    echo "error: quota gate role must be worker, continuation, or unprotected" >&2
+    echo "error: quota gate role must be worker, delivery, continuation, or unprotected" >&2
     exit 2
     ;;
 esac
@@ -49,8 +49,8 @@ fi
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 
+family=$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)
 if [ "$MODEL" = "${MODEL#openai-codex/}" ]; then
-  family=$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)
   case "$family" in
     codex) ;;
     pi|pi-signed)
@@ -69,6 +69,18 @@ if [ "$MODEL" = "${MODEL#openai-codex/}" ]; then
       ;;
   esac
 fi
+
+case "$ROLE" in
+  delivery|continuation)
+    case "$family" in
+      pi|pi-signed) ;;
+      *)
+        echo "error: Codex worker continuation denied because harness '$HARNESS' has no verified turn-start quota gate and may queue text before the next turn; let the active turn drain, use control keys if needed, and select a Pi-family Codex or non-Codex profile for follow-up work" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+esac
 
 [ -f "$POLICY" ] && [ ! -L "$POLICY" ] || {
   echo "error: Codex worker denied because $POLICY is not a regular policy file" >&2

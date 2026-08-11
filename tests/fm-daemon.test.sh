@@ -1793,7 +1793,7 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
 }
 
-test_inject_msg_respects_secondmate_worker_quota() {
+test_inject_msg_respects_secondmate_turn_boundaries() {
   local dir state err
   dir=$(make_supercase inject-worker-quota)
   state="$dir/state"
@@ -1805,8 +1805,9 @@ test_inject_msg_respects_secondmate_worker_quota() {
     > "$dir/config/quota-policy.json"
   cat > "$dir/fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
-jq -n --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-  {schemaVersion:3,providers:[{provider:"codex",state:{status:"fresh",stale:false,refreshedAt:$refreshed},quotaSemantics:{status:"known",effectiveAvailability:[{scope:"all_models",status:"known",effectivePercentRemaining:20}]}}]}'
+remaining=${FM_FAKE_CODEX_REMAINING:-20}
+jq -n --argjson remaining "$remaining" --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  {schemaVersion:3,providers:[{provider:"codex",state:{status:"fresh",stale:false,refreshedAt:$refreshed},quotaSemantics:{status:"known",effectiveAvailability:[{scope:"all_models",status:"known",effectivePercentRemaining:$remaining}]}}]}'
 SH
   chmod +x "$dir/fakebin/quota-axi"
   (
@@ -1814,14 +1815,15 @@ SH
     pane_is_busy() { fail "quota denial should happen before busy inspection"; }
     fm_backend_send_text_submit() { fail "quota denial should prevent away-mode submission"; }
     if PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_WORKER_HARNESS=codex \
+      FM_FAKE_CODEX_REMAINING=100 \
       FM_WORKER_MODEL=gpt-5 FM_SUPERVISOR_BACKEND=herdr \
       FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" 2> "$err"; then
-      fail "inject_msg should defer a Codex secondmate continuation at the reserve"
+      fail "inject_msg should defer native Codex without a verified turn-start gate"
     fi
-    assert_contains "$(cat "$err")" "20% remaining" \
-      "away-mode quota refusal did not reach the secondmate worker boundary"
+    assert_contains "$(cat "$err")" "no verified turn-start quota gate" \
+      "away-mode native Codex refusal did not name the missing turn boundary"
   ) || fail "secondmate worker-quota inject_msg subshell failed"
-  pass "inject_msg defers secondmate Codex continuations at the reserve"
+  pass "inject_msg defers native Codex continuations without a turn-start gate"
 
   printf '%s\n' $'pi\topenai-codex/gpt-5.6-sol' > "$state/.worker-runtime-identity"
   (
@@ -1829,10 +1831,12 @@ SH
     pane_is_busy() { fail "live Codex identity should deny before busy inspection"; }
     fm_backend_send_text_submit() { fail "live Codex identity should prevent away-mode submission"; }
     if PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_WORKER_HARNESS=pi \
-      FM_WORKER_MODEL=anthropic/claude-sonnet-5 FM_SUPERVISOR_BACKEND=herdr \
+      FM_FAKE_CODEX_REMAINING=20 FM_WORKER_MODEL=anthropic/claude-sonnet-5 FM_SUPERVISOR_BACKEND=herdr \
       FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" 2> "$err"; then
       fail "live Codex identity should override a stale non-Codex launch model"
     fi
+    assert_contains "$(cat "$err")" "20% remaining" \
+      "away-mode Pi Codex refusal did not reach the live worker boundary"
   ) || fail "live Codex worker-identity denial subshell failed"
   pass "inject_msg gates the current Pi Codex model instead of its launch model"
 
@@ -1986,6 +1990,6 @@ test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
-test_inject_msg_respects_secondmate_worker_quota
+test_inject_msg_respects_secondmate_turn_boundaries
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state

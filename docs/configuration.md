@@ -312,7 +312,9 @@ Inheritance materializes the resolved override into each secondmate home's `conf
 When present, the policy makes `fm-spawn.sh` refuse every raw launch command because Firstmate cannot verify which provider arbitrary shell text will run.
 Use a verified adapter through `--harness` or the positional adapter form instead.
 For structured spawns and relaunches that consume Codex quota, `fm-spawn.sh` takes a fresh `quota-axi --json` snapshot before the worker starts.
-`fm-send.sh` repeats the same gate before a text steer starts another Codex turn.
+`fm-send.sh` classifies every text steer and submitting key before delivery.
+Native Codex has no verified idle or turn-start boundary, and user text can queue behind an in-flight checkpoint, so enabling the policy refuses every text or submitting-key delivery to native Codex even above the reserve.
+Use a Pi-family Codex profile when later text continuations are required because its `before_agent_start` hook rechecks the live model and quota at the actual turn boundary.
 Internal Pi watcher and turn-end follow-ups and away-mode supervisor injections pass through the same worker gate in secondmate homes, while the captain brain remains outside this worker reserve.
 Every Pi logical run rechecks the gate at `before_agent_start` with the live provider and model, so a queued follow-up or parent steer cannot cross the reserve after enqueueing or after a model switch.
 Pi model changes update both later shell-command environments and the shared runtime identity consumed by each away-mode injection, while terminal-backed away mode also carries the current launch identity into its detached daemon.

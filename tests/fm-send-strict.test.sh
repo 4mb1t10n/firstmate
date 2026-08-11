@@ -225,7 +225,7 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
-test_codex_quota_reserve_drains_at_text_checkpoint() {
+test_native_codex_policy_preserves_only_control_keys() {
   local dir fb home err log rc submitting_key
   dir="$TMP_ROOT/codex-drain"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home codexdrain); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
@@ -233,18 +233,20 @@ test_codex_quota_reserve_drains_at_text_checkpoint() {
   enable_quota_policy "$home"
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
-    FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
+    FM_FAKE_CODEX_REMAINING=100 FM_SEND_SETTLE=0 \
     "$SEND" lane-drain "start another turn" >/dev/null 2>"$err"; rc=$?
-  expect_code 1 "$rc" "a new Codex text turn at the reserve should fail"
-  assert_contains "$(cat "$err")" "let any active Codex turn drain at its checkpoint" \
-    "the active-worker refusal did not explain checkpoint draining"
+  expect_code 1 "$rc" "native Codex text should fail without a verified turn-start gate"
+  assert_contains "$(cat "$err")" "no verified turn-start quota gate" \
+    "the native Codex refusal did not name its missing turn boundary"
+  assert_contains "$(cat "$err")" "let the active turn drain" \
+    "the native Codex refusal did not preserve in-flight draining"
   [ ! -s "$log" ] || fail "a denied Codex text turn still reached the endpoint"
 
   for submitting_key in Enter enter C-m; do
     PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
-      FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
+      FM_FAKE_CODEX_REMAINING=100 FM_SEND_SETTLE=0 \
       "$SEND" lane-drain --key "$submitting_key" >/dev/null 2>"$err"; rc=$?
-    expect_code 1 "$rc" "$submitting_key should not bypass the Codex reserve"
+    expect_code 1 "$rc" "$submitting_key should not bypass the native Codex turn boundary"
     [ ! -s "$log" ] || fail "a denied Codex $submitting_key still reached the endpoint"
   done
 
@@ -261,7 +263,7 @@ test_codex_quota_reserve_drains_at_text_checkpoint() {
   expect_code 0 "$rc" "an interrupt alias should remain available at the Codex reserve"
   assert_contains "$(cat "$log")" "arg=C-c" \
     "the normalized interrupt did not reach the draining Codex worker"
-  pass "Codex workers drain at the text-turn checkpoint while control keys remain available"
+  pass "native Codex policy preserves in-flight drain and control keys"
 }
 
 test_quota_policy_covers_pi_and_unknown_endpoints() {
@@ -277,6 +279,14 @@ test_quota_policy_covers_pi_and_unknown_endpoints() {
   expect_code 1 "$rc" "Pi using an openai-codex model should respect the reserve"
   [ ! -s "$log" ] || fail "a denied Pi Codex text turn still reached the endpoint"
 
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_CODEX_REMAINING=21 FM_SEND_SETTLE=0 \
+    "$SEND" lane-pi "continue above reserve" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "Pi Codex delivery should proceed above the reserve for its live turn recheck"
+  assert_contains "$(cat "$log")" "arg=continue above reserve" \
+    "an allowed Pi Codex delivery did not reach the endpoint"
+
+  : > "$log"
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
     FM_FAKE_CODEX_REMAINING=100 FM_SEND_SETTLE=0 \
     "$SEND" sess:outside "unclassified turn" >/dev/null 2>"$err"; rc=$?
@@ -300,7 +310,7 @@ test_endpoint_meta_override_keeps_target_identity_narrow() {
   fb=$(make_stubs "$dir"); home=$(setup_home endpointoverride); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
   mkdir -p "$home/state/parent-route"
   meta="$home/state/parent-route/route.meta"
-  fm_write_meta "$meta" "window=sess:fm-route" "worktree=$home" "project=$home" "kind=secondmate" "harness=codex" "model=gpt-5.6-sol"
+  fm_write_meta "$meta" "window=sess:fm-route" "worktree=$home" "project=$home" "kind=secondmate" "harness=claude" "model=claude-sonnet-5"
   enable_quota_policy "$home"
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
@@ -357,6 +367,6 @@ test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
-test_codex_quota_reserve_drains_at_text_checkpoint
+test_native_codex_policy_preserves_only_control_keys
 test_quota_policy_covers_pi_and_unknown_endpoints
 test_endpoint_meta_override_keeps_target_identity_narrow
