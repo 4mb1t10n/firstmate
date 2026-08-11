@@ -124,6 +124,25 @@ test_quota_consumer_classification() {
   pass "Codex quota gate classifies provider-aware and ambiguous worker profiles"
 }
 
+test_unprotected_turn_boundary_is_policy_gated() {
+  local home calls out rc
+  home=$(make_case unprotected)
+  calls="$home/quota.calls"
+
+  out=$(run_gate_role "$home" unprotected pi anthropic/claude-sonnet-5); rc=$?
+  expect_code 0 "$rc" "an absent optional policy should allow an unprotected raw Pi launch"
+  [ -z "$out" ] || fail "an absent policy should be silent for an unprotected launch: $out"
+
+  write_policy "$home"
+  out=$(run_gate_role "$home" unprotected pi anthropic/claude-sonnet-5 \
+    FM_FAKE_QUOTA_CALLS="$calls"); rc=$?
+  expect_code 1 "$rc" "a configured policy should refuse an unprotected raw Pi launch"
+  assert_contains "$out" "raw Pi launch cannot install the required live quota turn gate" \
+    "the unprotected launch refusal did not name the missing turn boundary"
+  [ ! -s "$calls" ] || fail "an unprotected launch unnecessarily collected telemetry before refusing"
+  pass "configured quota policy requires a protected Pi turn boundary"
+}
+
 test_stale_telemetry_fails_closed() {
   local home out rc
   home=$(make_case stale)
@@ -214,6 +233,7 @@ SH
 test_optional_policy_and_exact_reserve
 test_policy_shape_and_source_fail_closed
 test_quota_consumer_classification
+test_unprotected_turn_boundary_is_policy_gated
 test_stale_telemetry_fails_closed
 test_ambiguous_telemetry_fails_closed
 test_internal_continuations_gate_only_secondmate_workers

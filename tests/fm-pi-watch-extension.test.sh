@@ -221,7 +221,10 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_QUOTA_GATE_LOG:?}"
 count=$(wc -l < "$FM_QUOTA_GATE_LOG")
-[ "$count" -lt 2 ]
+if [ "$count" -ge 2 ]; then
+  printf '%s\n' 'error: Codex worker denied at 80% consumed (20% remaining)' >&2
+  exit 1
+fi
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-codex-quota-gate.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
@@ -236,6 +239,8 @@ const handlers = new Map();
 let arm = null;
 let prompts = 0;
 let aborts = 0;
+let notification = "";
+let severity = "";
 const pi = {
   on(event, callback) {
     handlers.set(event, callback);
@@ -263,8 +268,18 @@ await handlers.get("before_agent_start")?.({}, {
   abort() {
     aborts += 1;
   },
+  ui: {
+    notify(message, level) {
+      notification = message;
+      severity = level;
+    },
+  },
 });
 if (aborts !== 1) throw new Error(`queued turn was not aborted at its actual start: ${aborts}`);
+if (!notification.includes("20% remaining")) {
+  throw new Error(`queued turn denial did not surface quota detail: ${notification}`);
+}
+if (severity !== "error") throw new Error(`queued turn denial used severity ${severity}`);
 const calls = readFileSync(process.env.FM_QUOTA_GATE_LOG, "utf8").trim().split("\n");
 if (calls.length !== 2 || calls.some((call) => call !== "continuation pi openai-codex/gpt-5.6-sol")) {
   throw new Error(`unexpected quota checks: ${calls.join(" | ")}`);

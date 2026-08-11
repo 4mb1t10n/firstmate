@@ -112,7 +112,9 @@
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
-#   never falls back to pi.
+#   never falls back to pi. When the optional Codex quota policy is present, a
+#   raw Pi-family command is refused because it cannot carry the verified
+#   live-model turn gate; use the bare adapter plus --model/--effort instead.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -404,7 +406,7 @@ fi
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
-  local remote_traceparent remote_recorded_traceparent
+  local remote_traceparent remote_recorded_traceparent remote_replacement=0
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
@@ -503,6 +505,7 @@ spawn_remote_secondmate() {
       echo "error: existing metadata for $id does not identify this remote secondmate route" >&2
       return 1
     fi
+    remote_replacement=1
   fi
   # Gate the host before anything is published or transferred, so a host that
   # cannot hold a durable Herdr endpoint refuses here rather than half-way
@@ -567,6 +570,7 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  [ "$remote_replacement" -eq 0 ] || launch_args+=(--replacement)
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
@@ -1268,8 +1272,10 @@ raw_launch_harness() {
   return 1
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=$(raw_launch_harness "$LAUNCH" 2>/dev/null || true)
     ;;
@@ -1347,6 +1353,14 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+
+if [ "$RAW_LAUNCH" -eq 1 ]; then
+  case "$HARNESS" in
+    pi|pi-signed)
+      "$SCRIPT_DIR/fm-codex-quota-gate.sh" unprotected "$HARNESS" "${MODEL:-default}" || exit 1
+      ;;
+  esac
 fi
 
 "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker "$HARNESS" "${MODEL:-default}" || exit 1
@@ -1917,6 +1931,14 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 retire_secondmate_replacement_runtime() {
   local meta="$STATE/$ID.meta" replacement=$RELAUNCH recorded_home current
   local recorded_backend recorded_target backend_count
+  case "${FM_SECONDMATE_REPLACEMENT:-0}" in
+    0) ;;
+    1) replacement=1 ;;
+    *)
+      echo "error: FM_SECONDMATE_REPLACEMENT must be 0 or 1" >&2
+      return 1
+      ;;
+  esac
   if [ "$replacement" -eq 0 ]; then
     if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
       return 0
@@ -2565,6 +2587,7 @@ EOF
 // current-state truth.
 import { execFile, spawnSync } from "node:child_process";
 type PiModelIdentity = { provider?: string; id?: string };
+type WorkerTurnGate = { allowed: boolean; message: string };
 const quotaGate = "$FM_ROOT/bin/fm-codex-quota-gate.sh";
 const workerHarness = process.env.FM_WORKER_HARNESS || process.env.FM_PI_HARNESS || "pi";
 const fmHome = process.env.FM_HOME || "";
@@ -2581,23 +2604,33 @@ const selectActiveModel = (model?: PiModelIdentity) => {
   activeModel = model.provider + "/" + model.id;
   process.env.FM_WORKER_MODEL = activeModel;
 };
-const workerTurnAllowed = (model?: PiModelIdentity) => {
+const workerTurnGate = (model?: PiModelIdentity): WorkerTurnGate => {
   const selected = model?.provider && model.id
     ? model.provider + "/" + model.id
     : activeModel;
-  if (!fmHome) return false;
+  if (!fmHome) {
+    return { allowed: false, message: "Codex worker denied because FM_HOME is unavailable" };
+  }
   const result = spawnSync(
     "bash",
     [quotaGate, "worker", workerHarness, selected],
-    { cwd: "$FM_ROOT", env: { ...process.env, FM_HOME: fmHome } },
+    { cwd: "$FM_ROOT", env: { ...process.env, FM_HOME: fmHome }, encoding: "utf8" },
   );
-  return result.status === 0;
+  const message = String(result.stderr || result.error?.message || result.stdout || "").trim();
+  return {
+    allowed: result.status === 0,
+    message: message || "Codex worker denied because the quota gate failed without an explanation",
+  };
 };
 export default function (pi: any) {
   pi.on("session_start", (_event: any, ctx: any) => selectActiveModel(ctx?.model));
   pi.on("before_agent_start", (_event: any, ctx: any) => {
     selectActiveModel(ctx?.model);
-    if (!workerTurnAllowed(ctx?.model)) ctx.abort();
+    const gate = workerTurnGate(ctx?.model);
+    if (!gate.allowed) {
+      ctx?.ui?.notify?.(gate.message, "error");
+      ctx.abort();
+    }
   });
   pi.on("model_select", (event: any) => selectActiveModel(event.model));
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));

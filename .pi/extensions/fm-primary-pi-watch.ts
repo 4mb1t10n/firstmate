@@ -61,6 +61,11 @@ type PiModelIdentity = {
   id?: string;
 };
 
+type WorkerContinuationGate = {
+  allowed: boolean;
+  message: string;
+};
+
 function refreshWatchToolShell(
   state: WatchToolShellState,
   theme: Theme,
@@ -144,7 +149,7 @@ function publishWorkerIdentity(): void {
   }
 }
 
-function workerContinuationAllowed(model?: PiModelIdentity): boolean {
+function workerContinuationGate(model?: PiModelIdentity): WorkerContinuationGate {
   const continuationModel = model?.provider && model.id
     ? `${model.provider}/${model.id}`
     : activeModel;
@@ -159,9 +164,14 @@ function workerContinuationAllowed(model?: PiModelIdentity): boolean {
     {
       cwd: fmRoot,
       env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot },
+      encoding: "utf8",
     },
   );
-  return result.status === 0;
+  const message = String(result.stderr || result.error?.message || result.stdout || "").trim();
+  return {
+    allowed: result.status === 0,
+    message: message || "Codex worker denied because the quota gate failed without an explanation",
+  };
 }
 
 function parentPid(pid: string): string {
@@ -297,7 +307,8 @@ export default function (pi: ExtensionAPI) {
     recovery?: { generation: string; watcherPid: string },
   ): Promise<void> {
     if (!generationIsLive(owner)) return;
-    if (!workerContinuationAllowed()) throw new Error("worker continuation denied by quota policy");
+    const gate = workerContinuationGate();
+    if (!gate.allowed) throw new Error(gate.message);
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
@@ -541,7 +552,11 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on?.("before_agent_start", (_event, ctx) => {
     selectActiveModel(ctx?.model);
-    if (!workerContinuationAllowed(ctx?.model)) ctx.abort();
+    const gate = workerContinuationGate(ctx?.model);
+    if (!gate.allowed) {
+      ctx.ui.notify(gate.message, "error");
+      ctx.abort();
+    }
   });
   pi.on?.("model_select", (event) => {
     selectActiveModel(event.model);

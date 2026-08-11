@@ -228,6 +228,24 @@ RELAUNCH_INJECTED=$(remote_injected_traceparent)
   || fail "a remote relaunch must re-export the original carrier (first='$PARENT_TP' injected='$RELAUNCH_INJECTED')"
 pass "relaunch: a remote-routed second mate keeps one stable identity across restarts"
 
+rm -f "$REMOTE_HOME/state/parent-route/ios.meta"
+: > "$REMOTE_HOME/state/.afk"
+printf '%s\n' $'none\t-\tnative' > "$REMOTE_HOME/state/.afk-daemon-terminal"
+printf '%s\n' $'pi\tanthropic/claude-sonnet-5' > "$REMOTE_HOME/state/.worker-runtime-identity"
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
+  || fail "remote secondmate recovery without route metadata failed"
+assert_present "$REMOTE_HOME/state/.afk" \
+  "remote recovery cleared the durable away-mode intent"
+assert_absent "$REMOTE_HOME/state/.afk-daemon-terminal" \
+  "remote recovery left the prior away daemon lifecycle record attached"
+assert_absent "$REMOTE_HOME/state/.worker-runtime-identity" \
+  "remote recovery left the prior away daemon bound to stale worker identity"
+[ "$(meta_traceparent "$REMOTE_HOME/state/parent-route/ios.meta")" = "$PARENT_TP" ] \
+  || fail "remote recovery without route metadata changed the task trace identity"
+pass "remote recovery retires home lifecycle state without route metadata"
+
 # --- per-task boundary: ambient carriers are never adopted or shared ---------
 # A persistent supervisor exports its own launch-time TRACEPARENT for its whole
 # life. A second remote route resolved from that same environment must root its

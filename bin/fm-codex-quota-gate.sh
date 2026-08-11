@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Enforce the captain's Codex reserve before a worker starts another turn.
-# Usage: fm-codex-quota-gate.sh [worker|continuation [harness [model]]]
+# Usage: fm-codex-quota-gate.sh [worker|continuation|unprotected [harness [model]]]
 #
-# Silent success means the optional policy is absent or current Codex
-# availability is above its configured reserve. Every configured uncertainty
-# fails closed so a stale snapshot can never spend the protected reserve.
+# Silent success means the optional policy is absent, or the caller has a live
+# turn boundary and current Codex availability is above its configured reserve.
+# Every configured uncertainty fails closed so a stale snapshot can never spend
+# the protected reserve.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,9 +20,9 @@ MODEL=default
 [ "$#" -lt 3 ] || MODEL=$3
 
 case "$ROLE" in
-  worker|continuation) ;;
+  worker|continuation|unprotected) ;;
   *)
-    echo "error: quota gate role must be worker or continuation" >&2
+    echo "error: quota gate role must be worker, continuation, or unprotected" >&2
     exit 2
     ;;
 esac
@@ -30,6 +31,11 @@ esac
   exit 2
 }
 [ -e "$POLICY" ] || [ -L "$POLICY" ] || exit 0
+
+if [ "$ROLE" = unprotected ]; then
+  echo "error: Codex worker denied because a raw Pi launch cannot install the required live quota turn gate; use the verified --harness pi or --harness pi-signed adapter" >&2
+  exit 1
+fi
 
 if [ "$ROLE" = continuation ]; then
   SECOND_MATE_MARKER="$FM_HOME/.fm-secondmate-home"

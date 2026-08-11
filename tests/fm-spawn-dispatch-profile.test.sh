@@ -539,7 +539,7 @@ test_opencode_threads_model_and_ignores_effort_axis() {
 }
 
 test_pi_threads_model_and_max_effort() {
-  local rec id out status launch ext
+  local rec id out status launch
   id=profile-pi-z8
   rec=$(make_spawn_case profile-pi pi "$id")
   read_case_record "$rec"
@@ -556,15 +556,6 @@ test_pi_threads_model_and_max_effort() {
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi launch lost the canonical typed launch-brief envelope"
-  ext=$(cat "$HOME_DIR/state/$id.pi-ext.ts")
-  assert_contains "$ext" 'pi.on("before_agent_start"' \
-    "ordinary Pi workers do not enforce quota at the actual turn-start boundary"
-  assert_contains "$ext" 'pi.on("model_select"' \
-    "ordinary Pi workers do not track runtime model changes"
-  assert_contains "$ext" '[quotaGate, "worker", workerHarness, selected]' \
-    "ordinary Pi turn starts do not call the worker quota gate"
-  assert_contains "$ext" 'ctx.abort()' \
-    "ordinary Pi turn starts do not abort when quota is denied"
   pass "pi receives --model and --thinking max profile flags"
 }
 
@@ -846,6 +837,84 @@ test_raw_env_codex_launch_respects_quota_reserve() {
   pass "env-wrapped raw Codex launches respect the quota reserve"
 }
 
+test_raw_pi_launch_requires_live_quota_boundary() {
+  local rec id out status
+  id=profile-raw-pi-boundary-z22
+  rec=$(make_spawn_case profile-raw-pi-boundary claude "$id")
+  read_case_record "$rec"
+  enable_quota_policy "$HOME_DIR"
+
+  out=$(FM_FAKE_CODEX_REMAINING=100 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "pi --unsafe-custom" --model anthropic/claude-sonnet-5)
+  status=$?
+
+  expect_code 1 "$status" "raw Pi should be refused when it cannot load the live quota gate"
+  assert_contains "$out" "raw Pi launch cannot install the required live quota turn gate" \
+    "the raw Pi refusal did not direct the operator to the verified adapter"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "an unprotected raw Pi launch published task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unprotected raw Pi launch typed a launch command"
+  pass "raw Pi cannot bypass the configured live quota boundary"
+}
+
+test_pi_runtime_quota_denial_is_actionable() {
+  local rec id out status plugin
+  id=profile-pi-runtime-denial-z23
+  rec=$(make_spawn_case profile-pi-runtime-denial pi "$id")
+  read_case_record "$rec"
+  enable_quota_policy "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-5)
+  status=$?
+  expect_code 0 "$status" "a protected Pi worker should launch on a non-Codex model"
+  plugin="$HOME_DIR/state/$id.pi-ext.ts"
+
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE= \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_QUOTA_POLICY_PATH= \
+    FM_WORKER_HARNESS=pi FM_WORKER_MODEL=anthropic/claude-sonnet-5 \
+    FM_FAKE_CODEX_REMAINING=20 PATH="$FAKEBIN_DIR:$PATH" \
+    node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let aborts = 0;
+let notification = "";
+let severity = "";
+const pi = {
+  on(event, callback) {
+    handlers.set(event, callback);
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const model = { provider: "openai-codex", id: "gpt-5.6-sol" };
+await handlers.get("before_agent_start")({}, {
+  model,
+  abort() {
+    aborts += 1;
+  },
+  ui: {
+    notify(message, level) {
+      notification = message;
+      severity = level;
+    },
+  },
+});
+if (aborts !== 1) throw new Error(`denied Pi turn was not aborted: ${aborts}`);
+if (!notification.includes("20% remaining")) {
+  throw new Error(`denied Pi turn did not surface quota detail: ${notification}`);
+}
+if (severity !== "error") throw new Error(`denied Pi turn used severity ${severity}`);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi turn-start denials should surface the quota gate reason"
+  [ -z "$out" ] || fail "Pi runtime denial test printed output: $out"
+  pass "Pi runtime quota denials remain actionable"
+}
+
 test_secondmate_uses_materialized_quota_policy() {
   local rec id sm override out status launch
   id=profile-secondmate-quota-override-z22
@@ -905,6 +974,8 @@ test_codex_quota_reserve_blocks_spawn_before_publication
 test_codex_quota_reserve_allows_spawn_above_cutoff
 test_pi_codex_profile_respects_quota_reserve
 test_raw_env_codex_launch_respects_quota_reserve
+test_raw_pi_launch_requires_live_quota_boundary
+test_pi_runtime_quota_denial_is_actionable
 test_secondmate_uses_materialized_quota_policy
 
 echo "# all fm-spawn-dispatch-profile tests passed"
