@@ -204,6 +204,82 @@ EOF
   pass "Pi watcher follow-ups honor secondmate worker quota"
 }
 
+test_pi_extension_rechecks_queued_turns_with_live_model() {
+  local repo home plugin quota_log out status
+  repo="$TMP_ROOT/pi-turn-start-quota-root"
+  home="$TMP_ROOT/pi-turn-start-quota-home"
+  quota_log="$TMP_ROOT/pi-turn-start-quota.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf '%s\n' pi-turn-start > "$home/.fm-secondmate-home"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  cat > "$repo/bin/fm-codex-quota-gate.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_QUOTA_GATE_LOG:?}"
+count=$(wc -l < "$FM_QUOTA_GATE_LOG")
+[ "$count" -lt 2 ]
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-codex-quota-gate.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    FM_WORKER_HARNESS=pi FM_WORKER_MODEL=anthropic/claude-sonnet-5 \
+    FM_QUOTA_GATE_LOG="$quota_log" FM_WATCH_REARM_RETRY_BASE_MS=5 \
+    FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=1 \
+    node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let arm = null;
+let prompts = 0;
+let aborts = 0;
+const pi = {
+  on(event, callback) {
+    handlers.set(event, callback);
+  },
+  registerCommand(name, options) {
+    if (name === "fm-watch-arm-pi") arm = options.handler;
+  },
+  registerTool() {},
+  sendUserMessage: async () => {
+    prompts += 1;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const model = { provider: "openai-codex", id: "gpt-5.6-sol" };
+await handlers.get("model_select")?.({ model }, {});
+await arm("", { ui: { notify() {} } });
+for (let i = 0; i < 250 && prompts === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (prompts !== 1) throw new Error(`expected one queued follow-up, got ${prompts}`);
+await handlers.get("before_agent_start")?.({}, {
+  model,
+  abort() {
+    aborts += 1;
+  },
+});
+if (aborts !== 1) throw new Error(`queued turn was not aborted at its actual start: ${aborts}`);
+const calls = readFileSync(process.env.FM_QUOTA_GATE_LOG, "utf8").trim().split("\n");
+if (calls.length !== 2 || calls.some((call) => call !== "continuation pi openai-codex/gpt-5.6-sol")) {
+  throw new Error(`unexpected quota checks: ${calls.join(" | ")}`);
+}
+if (!existsSync(`${process.env.FM_HOME}/state/.worker-runtime-identity`)) {
+  throw new Error("live model identity was not published before the turn-start check");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi queued turns should recheck quota at actual start with the live model"
+  [ -z "$out" ] || fail "Pi turn-start quota test printed output: $out"
+  pass "Pi queued turns recheck quota at actual start with the live model"
+}
+
 test_pi_extension_propagates_runtime_model() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-runtime-model-root"
@@ -2274,6 +2350,7 @@ EOF
 
 test_pi_extension_reports_external_healthy_watcher
 test_pi_extension_gates_secondmate_followups
+test_pi_extension_rechecks_queued_turns_with_live_model
 test_pi_extension_propagates_runtime_model
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop

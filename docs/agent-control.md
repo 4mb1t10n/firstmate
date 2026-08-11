@@ -69,7 +69,9 @@ It is not deterministic across the verified adapters: codex and grok resume only
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+5. **Retire inherited away supervision.**
+   When a secondmate is away, relaunch stops its old daemon after the old agent exits and retains `state/.afk` so the replacement session recovers away mode with its own runtime identity.
+6. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 

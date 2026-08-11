@@ -194,6 +194,22 @@ unit_stop_ordering() {
   rm -rf "$st"
 }
 
+unit_retire_preserves_away_state() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-retire.XXXXXX")
+  mkdir -p "$st/state"
+  date '+%s' > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" retire >/dev/null 2>&1 \
+    && [ -e "$st/state/.afk" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "retire: daemon record removed while durable away state is preserved"
+  else
+    fail "retire: away state or daemon record did not reach the restart boundary"
+  fi
+  rm -rf "$st"
+}
+
 unit_stop_rejects_reused_pid() {
   local st lock sleeper_pid
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-pid-reuse.XXXXXX")
@@ -947,6 +963,7 @@ unit_clear_stale
 unit_relative_paths_are_absolute_before_daemon_launch
 unit_fresh_vs_refresh
 unit_stop_ordering
+unit_retire_preserves_away_state
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized

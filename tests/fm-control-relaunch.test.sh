@@ -1151,6 +1151,53 @@ test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter() {
   pass "fm-control relaunch: a secondmate's child work is accounted for and its charter is left alone"
 }
 
+test_secondmate_relaunch_retires_old_away_daemon() {
+  local dir home out rc
+  dir=$(new_case sm-away sm-away)
+  home="$dir/home"
+  mkdir -p "$home/config"
+  printf 'codex\n' > "$home/config/secondmate-harness"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-away-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm-away\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# charter\n' > "$dir/smhome/data/charter.md"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  date '+%s' > "$dir/smhome/state/.afk"
+  printf 'none\t-\tnative\n' > "$dir/smhome/state/.afk-daemon-terminal"
+  printf '%s\n' $'pi\tanthropic/claude-sonnet-5' > "$dir/smhome/state/.worker-runtime-identity"
+  {
+    echo "window=fmses:fm-sm-away"
+    echo "endpoint_task_id=sm-away"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=pi"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=anthropic/claude-sonnet-5"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+    echo "projects="
+  } > "$home/state/sm-away.meta"
+  printf '%s\n' "fm-sm-away" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/becomes"
+
+  out=$(run_control "$dir" sm-away relaunch); rc=$?
+  expect_code 0 "$rc" "an away secondmate should relaunch after retiring its prior daemon"$'\n'"$out"
+  [ -e "$dir/smhome/state/.afk" ] \
+    || fail "relaunch cleared the durable away-mode recovery flag"
+  [ ! -e "$dir/smhome/state/.afk-daemon-terminal" ] \
+    || fail "the prior incarnation's away daemon record survived relaunch"
+  [ ! -e "$dir/smhome/state/.worker-runtime-identity" ] \
+    || fail "the prior incarnation's runtime identity survived relaunch"
+  [ "$(journal_field "$dir" sm-away away_mode)" = preserved-daemon-retired ] \
+    || fail "the relaunch journal did not record the away-daemon retirement"
+  [ "$(meta_field "$dir" sm-away harness)" = codex ] \
+    || fail "the replacement record did not publish the new Codex incarnation"
+  pass "fm-control relaunch: an away secondmate retires its old daemon before replacement"
+}
+
 test_secondmate_relaunch_refuses_an_unmarked_home() {
   local dir home out rc
   dir=$(new_case smbad sm2)
@@ -1395,6 +1442,7 @@ test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state
 test_journal_records_the_checkpoint_it_proved
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
+test_secondmate_relaunch_retires_old_away_daemon
 test_secondmate_relaunch_refuses_an_unmarked_home
 test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused

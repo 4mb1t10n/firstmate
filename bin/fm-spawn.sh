@@ -2356,6 +2356,18 @@ exclude_path() {
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 if [ "$RELAUNCH" -eq 1 ]; then
+  if [ "$KIND" = secondmate ]; then
+    if [ -e "$WT/state/.afk" ] \
+      && ! FM_HOME="$WT" FM_STATE_OVERRIDE="$WT/state" \
+          "$SCRIPT_DIR/fm-afk-launch.sh" retire; then
+      echo "error: could not retire the prior away-mode daemon for secondmate $ID; refusing to arm the replacement" >&2
+      exit 1
+    fi
+    rm -f "$WT/state/.worker-runtime-identity" || {
+      echo "error: could not retire the prior runtime identity for secondmate $ID; refusing to arm the replacement" >&2
+      exit 1
+    }
+  fi
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
   # files and turn-end token registry entries behind, and even a same-harness

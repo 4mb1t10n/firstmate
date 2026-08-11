@@ -144,14 +144,17 @@ function publishWorkerIdentity(): void {
   }
 }
 
-function workerContinuationAllowed(): boolean {
+function workerContinuationAllowed(model?: PiModelIdentity): boolean {
+  const continuationModel = model?.provider && model.id
+    ? `${model.provider}/${model.id}`
+    : activeModel;
   const result = spawnSync(
     "bash",
     [
       quotaGate,
       "continuation",
       process.env.FM_WORKER_HARNESS || process.env.FM_PI_HARNESS || "pi",
-      activeModel,
+      continuationModel,
     ],
     {
       cwd: fmRoot,
@@ -535,6 +538,10 @@ export default function (pi: ExtensionAPI) {
     activateGeneration(generation);
     selectActiveModel(ctx?.model);
     markLoaded();
+  });
+  pi.on?.("before_agent_start", (_event, ctx) => {
+    selectActiveModel(ctx?.model);
+    if (!workerContinuationAllowed(ctx?.model)) ctx.abort();
   });
   pi.on?.("model_select", (event) => {
     selectActiveModel(event.model);

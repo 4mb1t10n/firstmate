@@ -33,6 +33,8 @@
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
 #                              id, then clear state/.afk last.
+#   fm-afk-launch.sh retire    Stop and close the current daemon while retaining
+#                              state/.afk for restart recovery.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
@@ -146,7 +148,7 @@ fm_afk_launch_lock_release() {
 }
 
 fm_afk_launch_usage() {
-  sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -577,7 +579,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result
+  local clear_flag=${1:-1} pid pid_identity current_identity result=0 read_result
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -617,17 +619,27 @@ fm_afk_launch_stop() {
   if [ "$read_result" -eq 0 ]; then
     fm_afk_launch_close_recorded || result=1
   fi
-  # (3) Clear the away-mode flag LAST.
-  if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
-    fm_afk_launch_log "failed to clear away-mode flag"
-    result=1
+  # (3) Clear the away-mode flag LAST on an ordinary stop.
+  if [ "$clear_flag" -eq 1 ]; then
+    if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
+      fm_afk_launch_log "failed to clear away-mode flag"
+      result=1
+    fi
   fi
   if [ "$result" -eq 0 ]; then
-    fm_afk_launch_log "away mode stopped; daemon terminal torn down and .afk cleared"
+    if [ "$clear_flag" -eq 1 ]; then
+      fm_afk_launch_log "away mode stopped; daemon terminal torn down and .afk cleared"
+    else
+      fm_afk_launch_log "away daemon retired; .afk retained for restart recovery"
+    fi
   else
-    fm_afk_launch_log "away mode stopped; terminal teardown remains recorded for retry"
+    fm_afk_launch_log "away daemon stopped; terminal teardown remains recorded for retry"
   fi
   return "$result"
+}
+
+fm_afk_launch_retire() {
+  fm_afk_launch_stop 0
 }
 
 fm_afk_launch_main() {
@@ -645,6 +657,7 @@ fm_afk_launch_main() {
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;
     stop) fm_afk_launch_stop ;;
+    retire) fm_afk_launch_retire ;;
     reconcile) fm_afk_launch_reconcile ;;
     -h|--help|help) fm_afk_launch_usage ;;
     *) fm_afk_launch_usage >&2; return 2 ;;

@@ -766,7 +766,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local away_line exit_result state note_line
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -809,10 +809,25 @@ do_relaunch() {
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
+  away_line="away_mode=inactive"
+  if [ "$KIND" = secondmate ]; then
+    if [ -e "$WT/state/.afk" ]; then
+      if ! FM_HOME="$WT" FM_STATE_OVERRIDE="$WT/state" \
+          "$SCRIPT_DIR/fm-afk-launch.sh" retire; then
+        die "the old away-mode daemon for secondmate $ID could not be retired before replacement launch"
+      fi
+      away_line="away_mode=preserved-daemon-retired"
+    fi
+    rm -f "$WT/state/.worker-runtime-identity" \
+      || die "the old runtime identity for secondmate $ID could not be retired before replacement launch"
+    journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" \
+      "exit_result=$exit_result" "$away_line"
+  fi
+
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
-  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
+  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "$away_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
@@ -830,7 +845,7 @@ do_relaunch() {
   }
   RELAUNCH_AGENT_CONFIRMED=1
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "$away_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
