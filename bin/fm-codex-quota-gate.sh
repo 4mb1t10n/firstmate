@@ -101,24 +101,40 @@ fi
 remaining=$(jq -er --argjson maximum_age "$maximum_age" '
   def parsed_epoch:
     if type == "string" then sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 else error("timestamp") end;
-  select(.schemaVersion == 3)
-  | (.providers[] | select(.provider == "codex")) as $provider
-  | select($provider.state.status == "fresh" and $provider.state.stale == false)
-  | ($provider.state.refreshedAt | parsed_epoch) as $refreshed
-  | select((now - $refreshed) >= -60 and (now - $refreshed) <= $maximum_age)
-  | select($provider.quotaSemantics.status == "known")
-  | ($provider.quotaSemantics.effectiveAvailability[]
-      | select(.scope == "all_models" and .status == "known")
-      | .effectivePercentRemaining)
-  | select(type == "number" and . >= 0 and . <= 100)
+  [select(.schemaVersion == 3)
+    | [.providers[] | select(.provider == "codex")] as $providers
+    | select($providers | length == 1)
+    | $providers[0] as $provider
+    | select($provider.state.status == "fresh" and $provider.state.stale == false)
+    | ($provider.state.refreshedAt | parsed_epoch) as $refreshed
+    | select((now - $refreshed) >= -60 and (now - $refreshed) <= $maximum_age)
+    | select($provider.quotaSemantics.status == "known")
+    | [$provider.quotaSemantics.effectiveAvailability[]
+        | select(.scope == "all_models")] as $availability
+    | select($availability | length == 1)
+    | ($availability[0] | select(.status == "known") | .effectivePercentRemaining)
+    | select(type == "number" and . >= 0 and . <= 100)]
+  | select(length == 1)
+  | .[0]
 ' "$snapshot" 2>/dev/null) || {
   echo "error: Codex worker denied because quota telemetry is stale, incomplete, or incompatible" >&2
   exit 1
 }
 
-if jq -en --argjson remaining "$remaining" --argjson minimum "$minimum" \
-  '$remaining <= $minimum' >/dev/null; then
+at_or_below=$(jq -nr --argjson remaining "$remaining" --argjson minimum "$minimum" \
+  '$remaining <= $minimum' 2>/dev/null) || {
+  echo "error: Codex worker denied because quota telemetry is stale, incomplete, or incompatible" >&2
+  exit 1
+}
+case "$at_or_below" in
+true)
   used=$(jq -nr --argjson remaining "$remaining" '100 - $remaining')
   echo "error: Codex worker denied at ${used}% consumed (${remaining}% remaining); select a non-Codex dispatch profile and let any active Codex turn drain at its checkpoint" >&2
   exit 1
-fi
+  ;;
+false) ;;
+*)
+  echo "error: Codex worker denied because quota telemetry is stale, incomplete, or incompatible" >&2
+  exit 1
+  ;;
+esac

@@ -18,16 +18,19 @@ remaining=${FM_FAKE_CODEX_REMAINING:-100}
 refreshed=${FM_FAKE_CODEX_REFRESHED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 status=${FM_FAKE_CODEX_STATUS:-fresh}
 stale=${FM_FAKE_CODEX_STALE:-false}
+provider_count=${FM_FAKE_CODEX_PROVIDER_COUNT:-1}
+availability_count=${FM_FAKE_CODEX_AVAILABILITY_COUNT:-1}
 jq -n --argjson remaining "$remaining" --arg refreshed "$refreshed" \
-  --arg status "$status" --argjson stale "$stale" '
+  --arg status "$status" --argjson stale "$stale" \
+  --argjson provider_count "$provider_count" --argjson availability_count "$availability_count" '
   {
     schemaVersion: 3,
-    providers: [{
+    providers: [range(0; $provider_count) | {
       provider: "codex",
       state: {status: $status, stale: $stale, refreshedAt: $refreshed},
       quotaSemantics: {
         status: "known",
-        effectiveAvailability: [{
+        effectiveAvailability: [range(0; $availability_count) | {
           scope: "all_models",
           status: "known",
           effectivePercentRemaining: $remaining
@@ -125,9 +128,25 @@ test_stale_telemetry_fails_closed() {
   pass "Codex quota gate fails closed on stale telemetry"
 }
 
+test_ambiguous_telemetry_fails_closed() {
+  local home out rc
+  home=$(make_case ambiguous)
+  write_policy "$home"
+
+  out=$(run_gate "$home" codex gpt-5 FM_FAKE_CODEX_REMAINING=100 FM_FAKE_CODEX_PROVIDER_COUNT=2); rc=$?
+  expect_code 1 "$rc" "duplicate Codex providers should deny a new worker turn"
+  assert_contains "$out" "stale, incomplete, or incompatible" "duplicate providers did not fail closed"
+
+  out=$(run_gate "$home" codex gpt-5 FM_FAKE_CODEX_REMAINING=100 FM_FAKE_CODEX_AVAILABILITY_COUNT=2); rc=$?
+  expect_code 1 "$rc" "duplicate all-model availability should deny a new worker turn"
+  assert_contains "$out" "stale, incomplete, or incompatible" "duplicate availability did not fail closed"
+  pass "Codex quota gate rejects telemetry with ambiguous cardinality"
+}
+
 test_optional_policy_and_exact_reserve
 test_policy_shape_and_source_fail_closed
 test_quota_consumer_classification
 test_stale_telemetry_fails_closed
+test_ambiguous_telemetry_fails_closed
 
 echo "# all fm-codex-quota-gate tests passed"

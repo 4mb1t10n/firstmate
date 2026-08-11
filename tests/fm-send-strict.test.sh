@@ -226,7 +226,7 @@ test_healthy_fm_id_send_still_works() {
 }
 
 test_codex_quota_reserve_drains_at_text_checkpoint() {
-  local dir fb home err log rc
+  local dir fb home err log rc submitting_key
   dir="$TMP_ROOT/codex-drain"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home codexdrain); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
   fm_write_meta "$home/state/lane-drain.meta" "window=sess:fm-lane-drain" "kind=ship" "harness=codex" "model=gpt-5.6"
@@ -240,11 +240,13 @@ test_codex_quota_reserve_drains_at_text_checkpoint() {
     "the active-worker refusal did not explain checkpoint draining"
   [ ! -s "$log" ] || fail "a denied Codex text turn still reached the endpoint"
 
-  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
-    FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
-    "$SEND" lane-drain --key Enter >/dev/null 2>"$err"; rc=$?
-  expect_code 1 "$rc" "Enter should not bypass the Codex reserve"
-  [ ! -s "$log" ] || fail "a denied Codex Enter still reached the endpoint"
+  for submitting_key in Enter enter C-m; do
+    PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+      FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
+      "$SEND" lane-drain --key "$submitting_key" >/dev/null 2>"$err"; rc=$?
+    expect_code 1 "$rc" "$submitting_key should not bypass the Codex reserve"
+    [ ! -s "$log" ] || fail "a denied Codex $submitting_key still reached the endpoint"
+  done
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
     FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
@@ -252,6 +254,13 @@ test_codex_quota_reserve_drains_at_text_checkpoint() {
   expect_code 0 "$rc" "a control key should remain available at the Codex reserve"
   assert_contains "$(cat "$log")" "arg=Escape" \
     "the control key did not reach the draining Codex worker"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
+    "$SEND" lane-drain --key Ctrl-C >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "an interrupt alias should remain available at the Codex reserve"
+  assert_contains "$(cat "$log")" "arg=C-c" \
+    "the normalized interrupt did not reach the draining Codex worker"
   pass "Codex workers drain at the text-turn checkpoint while control keys remain available"
 }
 

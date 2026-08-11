@@ -139,6 +139,8 @@ fm_send_clear_after_interrupt() {  # <key>
 fm_send_normalize_key() {  # <key>
   case "$1" in
     Escape|escape|Esc|esc) printf '%s' Escape ;;
+    C-c|c-c|ctrl+c|Ctrl+c|Ctrl+C|ctrl-c|Ctrl-c|Ctrl-C|'Ctrl c'|'ctrl c') printf '%s' C-c ;;
+    C-u|c-u|ctrl+u|Ctrl+u|Ctrl+U|ctrl-u|Ctrl-u|'Ctrl u'|'ctrl u') printf '%s' C-u ;;
     *) printf '%s' "$1" ;;
   esac
 }
@@ -416,15 +418,16 @@ if [ "${1:-}" = "--key" ]; then
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
-  if [ "$semantic_key" = Enter ]; then
-    "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker "$TARGET_HARNESS" "${TARGET_MODEL:-default}" || exit 1
-  fi
+  case "$semantic_key" in
+    Escape|C-c|C-u) ;;
+    *) "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker "$TARGET_HARNESS" "${TARGET_MODEL:-default}" || exit 1 ;;
+  esac
   if [ "$TARGET_BACKEND" = remote ]; then
-    if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" < /dev/null; then
+    if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$semantic_key" < /dev/null; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
       exit 1
     fi
-  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
+  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$semantic_key" "$EXPECTED_LABEL"; then
     echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi

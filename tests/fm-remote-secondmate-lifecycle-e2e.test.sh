@@ -95,6 +95,26 @@ SH
 chmod +x "$REMOTE_ROOT/bin/tmux"
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
   "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
+cat > "$REMOTE_ROOT/bin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+jq -n --arg refreshed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  {
+    schemaVersion: 3,
+    providers: [{
+      provider: "codex",
+      state: {status: "fresh", stale: false, refreshedAt: $refreshed},
+      quotaSemantics: {
+        status: "known",
+        effectiveAvailability: [{
+          scope: "all_models",
+          status: "known",
+          effectivePercentRemaining: 100
+        }]
+      }
+    }]
+  }'
+SH
+chmod +x "$REMOTE_ROOT/bin/quota-axi"
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
@@ -856,6 +876,8 @@ pass "remote spawn serializes inheritance through launch publication"
 
 # A normal marked parent request traverses SSH, reaches the remote endpoint once,
 # and resolves only after the correlated remote log delta is ingested.
+printf '%s\n' '{"version":1,"codex":{"worker_minimum_percent_remaining":20,"active_worker_action":"drain-at-checkpoint"},"telemetry":{"maximum_snapshot_age_seconds":300,"stale_behavior":"deny"}}' \
+  > "$REMOTE_HOME/config/quota-policy.json"
 ssh_before_send=$(cat "$SSH_COUNT")
 set +e
 FM_FAKE_SSH_MODE=ambiguous remote_env "$ROOT/bin/fm-send.sh" fm-ios \
@@ -881,6 +903,7 @@ assert_grep "done [corr=$CORR]: remote build passed" "$PARENT/state/ios.status" 
 phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
 [ "$phase" = resolved ] || fail "correlated remote reply did not resolve the parent expectation"
 pass "marked send and routed reply complete through the existing parent correlation owner"
+rm -f "$REMOTE_HOME/config/quota-policy.json"
 rm -f "$PARENT/state/.wake-queue"
 
 printf '{"revision":2}\n' > "$PARENT/config/crew-dispatch.json"
