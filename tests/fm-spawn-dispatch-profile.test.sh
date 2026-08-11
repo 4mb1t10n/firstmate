@@ -539,7 +539,7 @@ test_opencode_threads_model_and_ignores_effort_axis() {
 }
 
 test_pi_threads_model_and_max_effort() {
-  local rec id out status launch
+  local rec id out status launch ext
   id=profile-pi-z8
   rec=$(make_spawn_case profile-pi pi "$id")
   read_case_record "$rec"
@@ -550,12 +550,21 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+  assert_contains "$launch" "FM_HOME='$HOME_DIR' FM_WORKER_HARNESS='pi' FM_WORKER_MODEL='openai-codex/gpt-5.6-sol' FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi launch did not force the regular TUI while threading the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi launch lost the canonical typed launch-brief envelope"
+  ext=$(cat "$HOME_DIR/state/$id.pi-ext.ts")
+  assert_contains "$ext" 'pi.on("before_agent_start"' \
+    "ordinary Pi workers do not enforce quota at the actual turn-start boundary"
+  assert_contains "$ext" 'pi.on("model_select"' \
+    "ordinary Pi workers do not track runtime model changes"
+  assert_contains "$ext" '[quotaGate, "worker", workerHarness, selected]' \
+    "ordinary Pi turn starts do not call the worker quota gate"
+  assert_contains "$ext" 'ctx.abort()' \
+    "ordinary Pi turn starts do not abort when quota is denied"
   pass "pi receives --model and --thinking max profile flags"
 }
 

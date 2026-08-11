@@ -1914,6 +1914,72 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+retire_secondmate_replacement_runtime() {
+  local meta="$STATE/$ID.meta" replacement=$RELAUNCH recorded_home current
+  local recorded_backend recorded_target backend_count
+  if [ "$replacement" -eq 0 ]; then
+    if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+      return 0
+    fi
+    [ -f "$meta" ] && [ ! -L "$meta" ] || {
+      echo "error: existing metadata for secondmate $ID is unsafe; refusing replacement" >&2
+      return 1
+    }
+    recorded_target=$(fm_backend_meta_exact_value "$meta" window) || {
+      echo "error: existing metadata for secondmate $ID has an ambiguous endpoint; refusing replacement" >&2
+      return 1
+    }
+    backend_count=$(grep -c '^backend=' "$meta" 2>/dev/null || true)
+    case "$backend_count" in
+      0) recorded_backend=tmux ;;
+      1) recorded_backend=$(fm_backend_meta_exact_value "$meta" backend) || recorded_backend= ;;
+      *) recorded_backend= ;;
+    esac
+    fm_control_backend_state_verified "$recorded_backend" || {
+      echo "error: existing metadata for secondmate $ID has no recovery-grade backend; refusing replacement" >&2
+      return 1
+    }
+    [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
+      echo "error: existing metadata for $ID is not a secondmate; refusing replacement" >&2
+      return 1
+    }
+    recorded_home=$(fm_meta_get "$meta" home)
+    recorded_home=$(resolved_existing_dir "$recorded_home") || {
+      echo "error: existing metadata for secondmate $ID names an unavailable home; refusing replacement" >&2
+      return 1
+    }
+    [ "$recorded_home" = "$WT" ] || {
+      echo "error: existing metadata for secondmate $ID names a different home; refusing replacement" >&2
+      return 1
+    }
+    current=$(fm_backend_agent_state "$recorded_backend" "$recorded_target")
+    case "$current" in
+      dead|missing) replacement=1 ;;
+      *)
+        echo "error: existing secondmate $ID endpoint is $current; refusing duplicate launch" >&2
+        return 1
+        ;;
+    esac
+  fi
+  [ "$replacement" -eq 1 ] || return 0
+  if [ -e "$WT/state/.afk-daemon-terminal" ] || [ -L "$WT/state/.afk-daemon-terminal" ] \
+    || [ -e "$WT/state/.supervise-daemon.lock" ] || [ -L "$WT/state/.supervise-daemon.lock" ]; then
+    FM_HOME="$WT" FM_STATE_OVERRIDE="$WT/state" \
+      "$SCRIPT_DIR/fm-afk-launch.sh" retire || {
+        echo "error: could not retire the prior away-mode daemon for secondmate $ID; refusing to arm the replacement" >&2
+        return 1
+      }
+  fi
+  rm -f "$WT/state/.worker-runtime-identity" || {
+    echo "error: could not retire the prior runtime identity for secondmate $ID; refusing to arm the replacement" >&2
+    return 1
+  }
+}
+
+if [ "$KIND" = secondmate ]; then
+  retire_secondmate_replacement_runtime || exit 1
+fi
+
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
@@ -2356,18 +2422,6 @@ exclude_path() {
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 if [ "$RELAUNCH" -eq 1 ]; then
-  if [ "$KIND" = secondmate ]; then
-    if [ -e "$WT/state/.afk" ] \
-      && ! FM_HOME="$WT" FM_STATE_OVERRIDE="$WT/state" \
-          "$SCRIPT_DIR/fm-afk-launch.sh" retire; then
-      echo "error: could not retire the prior away-mode daemon for secondmate $ID; refusing to arm the replacement" >&2
-      exit 1
-    fi
-    rm -f "$WT/state/.worker-runtime-identity" || {
-      echo "error: could not retire the prior runtime identity for secondmate $ID; refusing to arm the replacement" >&2
-      exit 1
-    }
-  fi
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
   # files and turn-end token registry entries behind, and even a same-harness
@@ -2509,7 +2563,12 @@ EOF
 // "turn_end" fires at every inner turn boundary (one LLM response plus its
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
 // current-state truth.
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+type PiModelIdentity = { provider?: string; id?: string };
+const quotaGate = "$FM_ROOT/bin/fm-codex-quota-gate.sh";
+const workerHarness = process.env.FM_WORKER_HARNESS || process.env.FM_PI_HARNESS || "pi";
+const fmHome = process.env.FM_HOME || "";
+let activeModel = process.env.FM_WORKER_MODEL || "default";
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -2517,7 +2576,30 @@ const busyEvent = (state: string, event: string) =>
       "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
     ], () => resolve());
   });
+const selectActiveModel = (model?: PiModelIdentity) => {
+  if (!model?.provider || !model.id) return;
+  activeModel = model.provider + "/" + model.id;
+  process.env.FM_WORKER_MODEL = activeModel;
+};
+const workerTurnAllowed = (model?: PiModelIdentity) => {
+  const selected = model?.provider && model.id
+    ? model.provider + "/" + model.id
+    : activeModel;
+  if (!fmHome) return false;
+  const result = spawnSync(
+    "bash",
+    [quotaGate, "worker", workerHarness, selected],
+    { cwd: "$FM_ROOT", env: { ...process.env, FM_HOME: fmHome } },
+  );
+  return result.status === 0;
+};
 export default function (pi: any) {
+  pi.on("session_start", (_event: any, ctx: any) => selectActiveModel(ctx?.model));
+  pi.on("before_agent_start", (_event: any, ctx: any) => {
+    selectActiveModel(ctx?.model);
+    if (!workerTurnAllowed(ctx?.model)) ctx.abort();
+  });
+  pi.on("model_select", (event: any) => selectActiveModel(event.model));
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
@@ -2781,6 +2863,13 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 esac
+if [ "$KIND" != secondmate ]; then
+  case "$HARNESS" in
+    pi|pi-signed)
+      LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") FM_WORKER_HARNESS=$(shell_quote "$HARNESS") FM_WORKER_MODEL=$(shell_quote "${MODEL:-default}") $LAUNCH"
+      ;;
+  esac
+fi
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a

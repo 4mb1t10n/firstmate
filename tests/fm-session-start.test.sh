@@ -225,6 +225,9 @@ for argument in "$@"; do
   previous=$argument
 done
 case "$*" in
+  *"lstart="*)
+    exec /bin/ps "$@"
+    ;;
   *"comm="*)
     if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ]; then
       printf '/usr/local/bin/%s\n' "$harness"
@@ -1165,6 +1168,9 @@ test_session_start_relaunches_missing_pi_secondmate() {
   IFS='|' read -r root home fakebin mate log spawned <<EOF
 $rec
 EOF
+  : > "$mate/state/.afk"
+  printf '%s\n' $'none\t-\tnative' > "$mate/state/.afk-daemon-terminal"
+  printf '%s\n' $'pi\tanthropic/claude-sonnet-5' > "$mate/state/.worker-runtime-identity"
 
   out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing)
 
@@ -1185,6 +1191,12 @@ EOF
   assert_not_contains "$(cat "$log")" "kill-window" "the deferred stage tried to kill an already-absent window"
   assert_grep 'harness=pi' "$home/state/$SESSION_START_SECOND_MATE_ID.meta" \
     "the real respawn path did not preserve the Pi harness: $(cat "$home/state/$SESSION_START_SECOND_MATE_ID.meta")"
+  assert_present "$mate/state/.afk" \
+    "secondmate recovery cleared the durable away-mode intent"
+  assert_absent "$mate/state/.afk-daemon-terminal" \
+    "secondmate recovery left the prior away daemon lifecycle record attached"
+  assert_absent "$mate/state/.worker-runtime-identity" \
+    "secondmate recovery left the prior away daemon bound to stale worker identity"
 
   first_calls=$(grep -c 'new-window' "$log" || true)
   rm -f "$home/state/.lock"
