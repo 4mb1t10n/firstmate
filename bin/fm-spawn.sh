@@ -112,9 +112,10 @@
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
-#   never falls back to pi. When the optional Codex quota policy is present, a
-#   raw Pi-family command is refused because it cannot carry the verified
-#   live-model turn gate; use the bare adapter plus --model/--effort instead.
+#   never falls back to pi. When the optional Codex quota policy is present,
+#   every raw launch command is refused because arbitrary shell text cannot
+#   establish a structured quota identity or verified live turn boundary; use
+#   the bare adapter plus --model/--effort instead.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -1356,11 +1357,7 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
 fi
 
 if [ "$RAW_LAUNCH" -eq 1 ]; then
-  case "$HARNESS" in
-    pi|pi-signed)
-      "$SCRIPT_DIR/fm-codex-quota-gate.sh" unprotected "$HARNESS" "${MODEL:-default}" || exit 1
-      ;;
-  esac
+  "$SCRIPT_DIR/fm-codex-quota-gate.sh" unprotected "$HARNESS" "${MODEL:-default}" || exit 1
 fi
 
 "$SCRIPT_DIR/fm-codex-quota-gate.sh" worker "$HARNESS" "${MODEL:-default}" || exit 1

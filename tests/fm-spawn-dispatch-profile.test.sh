@@ -816,28 +816,28 @@ test_pi_codex_profile_respects_quota_reserve() {
   pass "Pi openai-codex profiles respect the Codex quota reserve"
 }
 
-test_raw_env_codex_launch_respects_quota_reserve() {
+test_raw_env_codex_launch_requires_structured_quota_boundary() {
   local rec id out status
   id=profile-raw-codex-reserve-z21
   rec=$(make_spawn_case profile-raw-codex-reserve claude "$id")
   read_case_record "$rec"
   enable_quota_policy "$HOME_DIR"
 
-  export FM_FAKE_CODEX_REMAINING=20
+  export FM_FAKE_CODEX_REMAINING=100
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "env codex")
   status=$?
   unset FM_FAKE_CODEX_REMAINING
 
-  expect_code 1 "$status" "an env-wrapped raw Codex launch should be denied at the reserve"
-  assert_contains "$out" "20% remaining" \
-    "the env-wrapped Codex command was not classified as Codex quota consumption"
+  expect_code 1 "$status" "an env-wrapped raw Codex launch should require structured identity"
+  assert_contains "$out" "raw launch command cannot establish a structured quota identity" \
+    "the env-wrapped Codex command did not reach the raw launch boundary"
   assert_absent "$HOME_DIR/state/$id.meta" \
     "a denied raw Codex launch published task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "a denied raw Codex launch typed a launch command"
-  pass "env-wrapped raw Codex launches respect the quota reserve"
+  pass "env-wrapped raw Codex launches require structured quota identity"
 }
 
-test_raw_pi_launch_requires_live_quota_boundary() {
+test_raw_pi_launch_requires_structured_quota_boundary() {
   local rec id out status
   id=profile-raw-pi-boundary-z22
   rec=$(make_spawn_case profile-raw-pi-boundary claude "$id")
@@ -849,13 +849,36 @@ test_raw_pi_launch_requires_live_quota_boundary() {
       "$id" "$PROJ_DIR" "pi --unsafe-custom" --model anthropic/claude-sonnet-5)
   status=$?
 
-  expect_code 1 "$status" "raw Pi should be refused when it cannot load the live quota gate"
-  assert_contains "$out" "raw Pi launch cannot install the required live quota turn gate" \
-    "the raw Pi refusal did not direct the operator to the verified adapter"
+  expect_code 1 "$status" "raw Pi should be refused when it lacks structured quota identity"
+  assert_contains "$out" "raw launch command cannot establish a structured quota identity" \
+    "the raw Pi refusal did not name the missing identity boundary"
   assert_absent "$HOME_DIR/state/$id.meta" \
     "an unprotected raw Pi launch published task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "an unprotected raw Pi launch typed a launch command"
-  pass "raw Pi cannot bypass the configured live quota boundary"
+  pass "raw Pi requires structured quota identity"
+}
+
+test_composite_raw_launch_requires_structured_quota_boundary() {
+  local rec id out status
+  id=profile-raw-composite-boundary-z22b
+  rec=$(make_spawn_case profile-raw-composite-boundary claude "$id")
+  read_case_record "$rec"
+  enable_quota_policy "$HOME_DIR"
+
+  out=$(FM_FAKE_CODEX_REMAINING=100 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" \
+      "claude --version; exec codex --dangerously-bypass-approvals-and-sandbox" \
+      --model claude-sonnet-5)
+  status=$?
+
+  expect_code 1 "$status" "a composite raw command should require structured quota identity"
+  assert_contains "$out" "raw launch command cannot establish a structured quota identity" \
+    "the composite raw command did not reach the raw launch boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "a denied composite raw command published task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a denied composite raw command typed a launch command"
+  pass "composite raw commands cannot disguise Codex quota consumption"
 }
 
 test_pi_runtime_quota_denial_is_actionable() {
@@ -973,8 +996,9 @@ test_active_dispatch_profile_does_not_block_secondmate_launch
 test_codex_quota_reserve_blocks_spawn_before_publication
 test_codex_quota_reserve_allows_spawn_above_cutoff
 test_pi_codex_profile_respects_quota_reserve
-test_raw_env_codex_launch_respects_quota_reserve
-test_raw_pi_launch_requires_live_quota_boundary
+test_raw_env_codex_launch_requires_structured_quota_boundary
+test_raw_pi_launch_requires_structured_quota_boundary
+test_composite_raw_launch_requires_structured_quota_boundary
 test_pi_runtime_quota_denial_is_actionable
 test_secondmate_uses_materialized_quota_policy
 

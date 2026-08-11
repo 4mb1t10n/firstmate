@@ -129,18 +129,18 @@ test_unprotected_turn_boundary_is_policy_gated() {
   home=$(make_case unprotected)
   calls="$home/quota.calls"
 
-  out=$(run_gate_role "$home" unprotected pi anthropic/claude-sonnet-5); rc=$?
-  expect_code 0 "$rc" "an absent optional policy should allow an unprotected raw Pi launch"
+  out=$(run_gate_role "$home" unprotected claude claude-sonnet-5); rc=$?
+  expect_code 0 "$rc" "an absent optional policy should allow an unprotected raw launch command"
   [ -z "$out" ] || fail "an absent policy should be silent for an unprotected launch: $out"
 
   write_policy "$home"
-  out=$(run_gate_role "$home" unprotected pi anthropic/claude-sonnet-5 \
+  out=$(run_gate_role "$home" unprotected claude claude-sonnet-5 \
     FM_FAKE_QUOTA_CALLS="$calls"); rc=$?
-  expect_code 1 "$rc" "a configured policy should refuse an unprotected raw Pi launch"
-  assert_contains "$out" "raw Pi launch cannot install the required live quota turn gate" \
-    "the unprotected launch refusal did not name the missing turn boundary"
+  expect_code 1 "$rc" "a configured policy should refuse every unprotected raw launch command"
+  assert_contains "$out" "raw launch command cannot establish a structured quota identity" \
+    "the unprotected launch refusal did not name the missing identity boundary"
   [ ! -s "$calls" ] || fail "an unprotected launch unnecessarily collected telemetry before refusing"
-  pass "configured quota policy requires a protected Pi turn boundary"
+  pass "configured quota policy requires a structured launch boundary"
 }
 
 test_stale_telemetry_fails_closed() {

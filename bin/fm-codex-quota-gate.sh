@@ -33,7 +33,7 @@ esac
 [ -e "$POLICY" ] || [ -L "$POLICY" ] || exit 0
 
 if [ "$ROLE" = unprotected ]; then
-  echo "error: Codex worker denied because a raw Pi launch cannot install the required live quota turn gate; use the verified --harness pi or --harness pi-signed adapter" >&2
+  echo "error: worker denied under the Codex quota policy because a raw launch command cannot establish a structured quota identity or verified live turn gate; use a verified --harness adapter" >&2
   exit 1
 fi
 
