@@ -311,6 +311,8 @@ An acknowledgement that exceeds the grace interval changes reconciliation health
 Inheritance materializes the resolved override into each secondmate home's `config/quota-policy.json`, and the nested home reads that local copy.
 When present, the policy makes `fm-spawn.sh` refuse every raw launch command because Firstmate cannot verify which provider arbitrary shell text will run.
 Use a verified adapter through `--harness` or the positional adapter form instead.
+Each new endpoint records whether its adapter identity was structured and whether it has a verified turn-start quota gate.
+When the policy is enabled, an existing endpoint without that provenance, including a raw endpoint created before policy activation, must be relaunched through a verified adapter before it accepts text or a submitting key.
 For structured spawns and relaunches that consume Codex quota, `fm-spawn.sh` takes a fresh `quota-axi --json` snapshot before the worker starts.
 `fm-send.sh` classifies every text steer and submitting key before delivery.
 Native Codex has no verified idle or turn-start boundary, and user text can queue behind an in-flight checkpoint, so enabling the policy refuses every text or submitting-key delivery to native Codex even above the reserve.
@@ -318,7 +320,7 @@ Use a Pi-family Codex profile when later text continuations are required because
 Internal Pi watcher and turn-end follow-ups and away-mode supervisor injections pass through the same worker gate in secondmate homes, while the captain brain remains outside this worker reserve.
 Every Pi logical run rechecks the gate at `before_agent_start` with the live provider and model, so a queued follow-up or parent steer cannot cross the reserve after enqueueing or after a model switch.
 Pi model changes update both later shell-command environments and the shared runtime identity consumed by each away-mode injection, while terminal-backed away mode also carries the current launch identity into its detached daemon.
-Pi and Pi Signed profiles using an `openai-codex/*` model consume the protected quota, while a provider-unqualified Pi profile or an explicit endpoint without recorded harness identity is refused because its quota consumption cannot be proven.
+Pi and Pi Signed profiles using an `openai-codex/*` model consume the protected quota, while a provider-unqualified Pi profile or an explicit endpoint without recorded structured launch provenance is refused because its quota consumption cannot be proven.
 Non-submitting control keys remain available so an in-flight Codex turn can finish or be interrupted safely, but `Enter` is gated because it can submit pending composer text.
 At or below `worker_minimum_percent_remaining`, new Codex worker turns are refused and the first mate must resolve another task-compatible dispatch profile.
 Stale, malformed, missing, or older-schema telemetry fails closed for Codex workers.

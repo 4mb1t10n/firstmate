@@ -109,15 +109,19 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness traceparent
+  local id=$1 harness traceparent quota_identity quota_turn_gate
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
+  quota_identity=$(fm_meta_get "$REMOTE_ENDPOINT_META" quota_identity)
+  quota_turn_gate=$(fm_meta_get "$REMOTE_ENDPOINT_META" quota_turn_gate)
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
+  printf 'quota_identity=%s\n' "$quota_identity"
+  printf 'quota_turn_gate=%s\n' "$quota_turn_gate"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 

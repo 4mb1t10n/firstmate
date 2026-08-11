@@ -1815,6 +1815,7 @@ SH
     pane_is_busy() { fail "quota denial should happen before busy inspection"; }
     fm_backend_send_text_submit() { fail "quota denial should prevent away-mode submission"; }
     if PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_WORKER_HARNESS=codex \
+      FM_WORKER_QUOTA_IDENTITY=structured FM_WORKER_QUOTA_TURN_GATE=none \
       FM_FAKE_CODEX_REMAINING=100 \
       FM_WORKER_MODEL=gpt-5 FM_SUPERVISOR_BACKEND=herdr \
       FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" 2> "$err"; then
@@ -1831,6 +1832,7 @@ SH
     pane_is_busy() { fail "live Codex identity should deny before busy inspection"; }
     fm_backend_send_text_submit() { fail "live Codex identity should prevent away-mode submission"; }
     if PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_WORKER_HARNESS=pi \
+      FM_WORKER_QUOTA_IDENTITY=structured FM_WORKER_QUOTA_TURN_GATE=before-agent-start \
       FM_FAKE_CODEX_REMAINING=20 FM_WORKER_MODEL=anthropic/claude-sonnet-5 FM_SUPERVISOR_BACKEND=herdr \
       FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" 2> "$err"; then
       fail "live Codex identity should override a stale non-Codex launch model"
@@ -1847,6 +1849,7 @@ SH
     fm_backend_composer_state() { printf 'empty'; }
     fm_backend_send_text_submit() { printf 'empty'; }
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_WORKER_HARNESS=pi \
+      FM_WORKER_QUOTA_IDENTITY=structured FM_WORKER_QUOTA_TURN_GATE=before-agent-start \
       FM_WORKER_MODEL=openai-codex/gpt-5.6-sol FM_SUPERVISOR_BACKEND=herdr \
       FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
       || fail "live non-Codex identity should override a stale Codex launch model"

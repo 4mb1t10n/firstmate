@@ -1118,6 +1118,7 @@ SH
   chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-codex-quota-gate.sh"
   out=$(PLUGIN="$ext" FM_HOME="$home" FM_WORKER_HARNESS=pi \
     FM_WORKER_MODEL=anthropic/claude-sonnet-5 FM_QUOTA_GATE_LOG="$quota_log" \
+    FM_WORKER_QUOTA_IDENTITY=structured FM_WORKER_QUOTA_TURN_GATE=before-agent-start \
     node --input-type=module 2>&1 <<'EOF'
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -1139,7 +1140,7 @@ await handlers.get("agent_settled")(
   { model: { provider: "openai-codex", id: "gpt-5.6-sol" } },
 );
 const args = readFileSync(process.env.FM_QUOTA_GATE_LOG, "utf8").trim();
-if (args !== "continuation pi openai-codex/gpt-5.6-sol") throw new Error(`unexpected quota args: ${args}`);
+if (args !== "continuation pi openai-codex/gpt-5.6-sol structured before-agent-start") throw new Error(`unexpected quota args: ${args}`);
 if (prompts !== 0) throw new Error(`quota denial still delivered ${prompts} follow-ups`);
 EOF
 )

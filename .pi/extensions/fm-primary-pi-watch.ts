@@ -160,6 +160,8 @@ function workerContinuationGate(model?: PiModelIdentity): WorkerContinuationGate
       "continuation",
       process.env.FM_WORKER_HARNESS || process.env.FM_PI_HARNESS || "pi",
       continuationModel,
+      process.env.FM_WORKER_QUOTA_IDENTITY || "",
+      process.env.FM_WORKER_QUOTA_TURN_GATE || "",
     ],
     {
       cwd: fmRoot,

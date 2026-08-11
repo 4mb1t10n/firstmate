@@ -408,6 +408,7 @@ spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent remote_replacement=0
+  local expected_quota_turn_gate remote_quota_identity remote_quota_turn_gate
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
@@ -454,6 +455,10 @@ spawn_remote_secondmate() {
       echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
       return 1
       ;;
+  esac
+  expected_quota_turn_gate=none
+  case "$harness" in
+    pi|pi-signed) expected_quota_turn_gate=before-agent-start ;;
   esac
   model=${MODEL:--}
   effort=${EFFORT:--}
@@ -592,6 +597,8 @@ spawn_remote_secondmate() {
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+  remote_quota_identity=$(printf '%s\n' "$out" | sed -n 's/^quota_identity=//p' | tail -1)
+  remote_quota_turn_gate=$(printf '%s\n' "$out" | sed -n 's/^quota_turn_gate=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -611,6 +618,14 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
+    return 1
+  fi
+  if [ "$remote_quota_identity" != structured ] \
+    || [ "$remote_quota_turn_gate" != "$expected_quota_turn_gate" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch returned unproven quota provenance; relaunch the remote endpoint with the verified adapter before publishing its route" >&2
     return 1
   fi
   # Record what the remote endpoint ACTUALLY carries, read back from its own
@@ -634,6 +649,8 @@ spawn_remote_secondmate() {
     echo "tasktmp="
     echo "model=${model#-}"
     echo "effort=${effort#-}"
+    echo "quota_identity=$remote_quota_identity"
+    echo "quota_turn_gate=$remote_quota_turn_gate"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
     echo "remote_host=$host"
@@ -690,6 +707,8 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+QUOTA_IDENTITY=unprotected
+QUOTA_TURN_GATE=none
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -772,6 +791,8 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            echo "quota_identity=$QUOTA_IDENTITY"
+            echo "quota_turn_gate=$QUOTA_TURN_GATE"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -1307,6 +1328,14 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+if [ "$RAW_LAUNCH" -eq 0 ]; then
+  QUOTA_IDENTITY=structured
+  case "$HARNESS" in
+    pi|pi-signed) QUOTA_TURN_GATE=before-agent-start ;;
+    *) QUOTA_TURN_GATE=none ;;
+  esac
+fi
 
 case "$HARNESS" in
   pi|pi-signed)
@@ -2801,7 +2830,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort quota_identity quota_turn_gate busy_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2820,6 +2849,8 @@ preserve_relaunch_meta() {
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   echo "resource_class=$RESOURCE_CLASS"
+  echo "quota_identity=$QUOTA_IDENTITY"
+  echo "quota_turn_gate=$QUOTA_TURN_GATE"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -2896,7 +2927,7 @@ esac
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     pi|pi-signed)
-      LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") FM_WORKER_HARNESS=$(shell_quote "$HARNESS") FM_WORKER_MODEL=$(shell_quote "${MODEL:-default}") $LAUNCH"
+      LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") FM_WORKER_HARNESS=$(shell_quote "$HARNESS") FM_WORKER_MODEL=$(shell_quote "${MODEL:-default}") FM_WORKER_QUOTA_IDENTITY=$(shell_quote "$QUOTA_IDENTITY") FM_WORKER_QUOTA_TURN_GATE=$(shell_quote "$QUOTA_TURN_GATE") $LAUNCH"
       ;;
   esac
 fi
@@ -2915,6 +2946,8 @@ if [ "$KIND" = secondmate ]; then
   sq_primary_home=$(shell_quote "$FM_HOME")
   sq_worker_harness=$(shell_quote "$HARNESS")
   sq_worker_model=$(shell_quote "${MODEL:-default}")
+  sq_worker_quota_identity=$(shell_quote "$QUOTA_IDENTITY")
+  sq_worker_quota_turn_gate=$(shell_quote "$QUOTA_TURN_GATE")
   case "$HARNESS" in
     claude) supervision_model=autoarm ;;
     *) supervision_model=persistent ;;
@@ -2926,7 +2959,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_QUOTA_POLICY_PATH= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model FM_WORKER_HARNESS=$sq_worker_harness FM_WORKER_MODEL=$sq_worker_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_QUOTA_POLICY_PATH= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model FM_WORKER_HARNESS=$sq_worker_harness FM_WORKER_MODEL=$sq_worker_model FM_WORKER_QUOTA_IDENTITY=$sq_worker_quota_identity FM_WORKER_QUOTA_TURN_GATE=$sq_worker_quota_turn_gate $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"

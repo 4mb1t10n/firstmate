@@ -9,9 +9,10 @@
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
-# With the optional quota policy, submitting input to a Codex consumer requires
-# a verified turn-start recheck. Native Codex has no such boundary, so its text
-# and Enter deliveries are refused while non-submitting controls remain usable.
+# With the optional quota policy, submitting input requires recorded structured
+# launch provenance, and a Codex consumer also requires a verified turn-start
+# recheck. Native Codex has no such boundary, so its text and Enter deliveries
+# are refused while non-submitting controls remain usable.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the target backend confirms a
@@ -326,6 +327,12 @@ fm_send_resolve_target() {  # <raw-target>
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
+TARGET_QUOTA_IDENTITY=
+TARGET_QUOTA_TURN_GATE=
+if [ -n "$TARGET_META" ]; then
+  TARGET_QUOTA_IDENTITY=$(fm_meta_get "$TARGET_META" quota_identity)
+  TARGET_QUOTA_TURN_GATE=$(fm_meta_get "$TARGET_META" quota_turn_gate)
+fi
 shift
 
 # Collect --resolve-key flags (answerer-closes; see the header contract). They
@@ -454,7 +461,7 @@ if [ "${1:-}" = "--key" ]; then
   semantic_key=$(fm_send_normalize_key "$key")
   case "$semantic_key" in
     Escape|C-c|C-u) ;;
-    *) "$SCRIPT_DIR/fm-codex-quota-gate.sh" delivery "$TARGET_HARNESS" "${TARGET_MODEL:-default}" || exit 1 ;;
+    *) "$SCRIPT_DIR/fm-codex-quota-gate.sh" delivery "$TARGET_HARNESS" "${TARGET_MODEL:-default}" "$TARGET_QUOTA_IDENTITY" "$TARGET_QUOTA_TURN_GATE" || exit 1 ;;
   esac
   if [ "$TARGET_BACKEND" = remote ]; then
     if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$semantic_key" < /dev/null; then
@@ -470,7 +477,7 @@ if [ "${1:-}" = "--key" ]; then
 else
   MESSAGE=$*
   # Text and submitting keys use the delivery boundary; controls bypass it.
-  "$SCRIPT_DIR/fm-codex-quota-gate.sh" delivery "$TARGET_HARNESS" "${TARGET_MODEL:-default}" || exit 1
+  "$SCRIPT_DIR/fm-codex-quota-gate.sh" delivery "$TARGET_HARNESS" "${TARGET_MODEL:-default}" "$TARGET_QUOTA_IDENTITY" "$TARGET_QUOTA_TURN_GATE" || exit 1
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE

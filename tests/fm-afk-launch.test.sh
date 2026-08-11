@@ -30,7 +30,8 @@ pass() { printf 'ok - %s\n' "$1"; }
 SLEEPER=$(mktemp "${TMPDIR:-/tmp}/fm-afk-sleeper.XXXXXX")
 cat > "$SLEEPER" <<'SH'
 #!/usr/bin/env bash
-printf '%s\t%s\n' "${FM_WORKER_HARNESS:-}" "${FM_WORKER_MODEL:-}" > "$FM_HOME/.afk-worker-identity-seen"
+printf '%s\t%s\t%s\t%s\n' "${FM_WORKER_HARNESS:-}" "${FM_WORKER_MODEL:-}" \
+  "${FM_WORKER_QUOTA_IDENTITY:-}" "${FM_WORKER_QUOTA_TURN_GATE:-}" > "$FM_HOME/.afk-worker-identity-seen"
 exec sleep 600
 SH
 chmod +x "$SLEEPER"
@@ -883,6 +884,7 @@ e2e_herdr() {
 
   FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
     FM_WORKER_HARNESS=pi-signed FM_WORKER_MODEL=openai-codex/gpt-5.6-sol \
+    FM_WORKER_QUOTA_IDENTITY=structured FM_WORKER_QUOTA_TURN_GATE=before-agent-start \
     FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
     "$LAUNCH" start >/dev/null 2>&1
 
@@ -901,7 +903,7 @@ e2e_herdr() {
   if [ "$ws_during" -gt "$ws_before" ]; then pass "herdr e2e: daemon launched in a separate non-visible workspace"; else fail "herdr e2e: no separate daemon workspace created"; fi
   if [ -n "$dtab" ] && [ "$dtab" != "$cap_tab" ]; then pass "herdr e2e: daemon pane is NOT in the captain's tab"; else fail "herdr e2e: daemon pane shares the captain tab ($dtab)"; fi
   case "$dtgt" in "$SESSION":*) pass "herdr e2e: daemon terminal scoped to the lab session" ;; *) fail "herdr e2e: daemon terminal not in the lab session ($dtgt)" ;; esac
-  if [ "$identity_seen" = $'pi-signed\topenai-codex/gpt-5.6-sol' ]; then pass "herdr e2e: daemon inherits current worker identity"; else fail "herdr e2e: daemon lost worker identity ($identity_seen)"; fi
+  if [ "$identity_seen" = $'pi-signed\topenai-codex/gpt-5.6-sol\tstructured\tbefore-agent-start' ]; then pass "herdr e2e: daemon inherits current worker identity"; else fail "herdr e2e: daemon lost worker identity ($identity_seen)"; fi
 
   FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
     FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr "$LAUNCH" stop >/dev/null 2>&1
@@ -931,6 +933,7 @@ e2e_tmux() {
 
   FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
     FM_WORKER_HARNESS=pi-signed FM_WORKER_MODEL=openai-codex/gpt-5.6-sol \
+    FM_WORKER_QUOTA_IDENTITY=structured FM_WORKER_QUOTA_TURN_GATE=before-agent-start \
     FM_SUPERVISOR_TARGET="$cap_pane" FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
     "$LAUNCH" start >/dev/null 2>&1
 
@@ -945,7 +948,7 @@ e2e_tmux() {
   TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $rec"
   if [ "$before" = "$during" ]; then pass "tmux e2e: captain window pane count unchanged after start (no split-window)"; else fail "tmux e2e: captain window pane count changed ($before -> $during)"; fi
   if [ -n "$rec" ] && tmux has-session -t "$rec" 2>/dev/null && [ "$rec" != "$cap_session" ]; then pass "tmux e2e: daemon launched in a separate detached session"; else fail "tmux e2e: no separate daemon session ($rec)"; fi
-  if [ "$identity_seen" = $'pi-signed\topenai-codex/gpt-5.6-sol' ]; then pass "tmux e2e: daemon inherits current worker identity"; else fail "tmux e2e: daemon lost worker identity ($identity_seen)"; fi
+  if [ "$identity_seen" = $'pi-signed\topenai-codex/gpt-5.6-sol\tstructured\tbefore-agent-start' ]; then pass "tmux e2e: daemon inherits current worker identity"; else fail "tmux e2e: daemon lost worker identity ($identity_seen)"; fi
 
   FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
     FM_SUPERVISOR_TARGET="$cap_pane" FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" stop >/dev/null 2>&1

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Enforce the captain's Codex reserve before a worker starts another turn.
-# Usage: fm-codex-quota-gate.sh [worker|delivery|continuation|unprotected [harness [model]]]
+# Usage: fm-codex-quota-gate.sh [worker|delivery|continuation|unprotected [harness [model [identity [turn-gate]]]]]
 #
 # Silent success means the optional policy is absent, or the caller has a live
 # turn boundary and current Codex availability is above its configured reserve.
@@ -16,8 +16,12 @@ POLICY="${FM_QUOTA_POLICY_PATH:-$CONFIG/quota-policy.json}"
 ROLE=${1:-worker}
 HARNESS=codex
 MODEL=default
+QUOTA_IDENTITY=${FM_WORKER_QUOTA_IDENTITY:-}
+QUOTA_TURN_GATE=${FM_WORKER_QUOTA_TURN_GATE:-}
 [ "$#" -lt 2 ] || HARNESS=$2
 [ "$#" -lt 3 ] || MODEL=$3
+[ "$#" -lt 4 ] || QUOTA_IDENTITY=$4
+[ "$#" -lt 5 ] || QUOTA_TURN_GATE=$5
 
 case "$ROLE" in
   worker|delivery|continuation|unprotected) ;;
@@ -26,8 +30,8 @@ case "$ROLE" in
     exit 2
     ;;
 esac
-[ "$#" -le 3 ] || {
-  echo "error: quota gate accepts role, harness, and model only" >&2
+[ "$#" -le 5 ] || {
+  echo "error: quota gate accepts role, harness, model, identity provenance, and turn-gate provenance only" >&2
   exit 2
 }
 [ -e "$POLICY" ] || [ -L "$POLICY" ] || exit 0
@@ -45,6 +49,15 @@ if [ "$ROLE" = continuation ]; then
     exit 1
   }
 fi
+
+case "$ROLE" in
+  delivery|continuation)
+    if [ "$QUOTA_IDENTITY" != structured ]; then
+      echo "error: Codex quota policy denied worker input because endpoint identity provenance '${QUOTA_IDENTITY:-missing}' does not prove a structured launch; relaunch the endpoint with a verified adapter before sending more text" >&2
+      exit 1
+    fi
+    ;;
+esac
 
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
@@ -72,8 +85,8 @@ fi
 
 case "$ROLE" in
   delivery|continuation)
-    case "$family" in
-      pi|pi-signed) ;;
+    case "$family:$QUOTA_TURN_GATE" in
+      pi:before-agent-start|pi-signed:before-agent-start) ;;
       *)
         echo "error: Codex worker continuation denied because harness '$HARNESS' has no verified turn-start quota gate and may queue text before the next turn; let the active turn drain, use control keys if needed, and select a Pi-family Codex or non-Codex profile for follow-up work" >&2
         exit 1

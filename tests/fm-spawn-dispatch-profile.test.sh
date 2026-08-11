@@ -159,10 +159,18 @@ EOF
 }
 
 assert_meta_profile() {
-  local meta=$1 harness=$2 model=$3 effort=$4
+  local meta=$1 harness=$2 model=$3 effort=$4 identity=${5:-structured} turn_gate=${6:-}
+  if [ -z "$turn_gate" ]; then
+    case "$harness" in
+      pi|pi-signed) turn_gate=before-agent-start ;;
+      *) turn_gate=none ;;
+    esac
+  fi
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+  assert_grep "quota_identity=$identity" "$meta" "meta missing quota_identity=$identity"
+  assert_grep "quota_turn_gate=$turn_gate" "$meta" "meta missing quota_turn_gate=$turn_gate"
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
@@ -409,7 +417,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default unprotected none
   launch=$(cat "$LAUNCH_LOG")
   [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
@@ -550,7 +558,7 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_HOME='$HOME_DIR' FM_WORKER_HARNESS='pi' FM_WORKER_MODEL='openai-codex/gpt-5.6-sol' FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+  assert_contains "$launch" "FM_HOME='$HOME_DIR' FM_WORKER_HARNESS='pi' FM_WORKER_MODEL='openai-codex/gpt-5.6-sol' FM_WORKER_QUOTA_IDENTITY='structured' FM_WORKER_QUOTA_TURN_GATE='before-agent-start' FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi launch did not force the regular TUI while threading the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
@@ -662,7 +670,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
     "pi-signed secondmate spawn did not preserve its runtime identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_WORKER_HARNESS='pi-signed' FM_WORKER_MODEL='openai-codex/gpt-5.6-sol' FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+  assert_contains "$launch" "FM_WORKER_HARNESS='pi-signed' FM_WORKER_MODEL='openai-codex/gpt-5.6-sol' FM_WORKER_QUOTA_IDENTITY='structured' FM_WORKER_QUOTA_TURN_GATE='before-agent-start' FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
@@ -959,7 +967,7 @@ test_secondmate_uses_materialized_quota_policy() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "FM_QUOTA_POLICY_PATH=" \
     "the secondmate launch did not clear the parent-only override path"
-  assert_contains "$launch" "FM_WORKER_HARNESS='codex' FM_WORKER_MODEL='default' codex" \
+  assert_contains "$launch" "FM_WORKER_HARNESS='codex' FM_WORKER_MODEL='default' FM_WORKER_QUOTA_IDENTITY='structured' FM_WORKER_QUOTA_TURN_GATE='none' codex" \
     "the Codex secondmate launch did not retain its worker continuation identity"
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" \
     "the secondmate did not launch after policy materialization"

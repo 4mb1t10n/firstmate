@@ -75,6 +75,8 @@ function workerContinuationAllowed(model?: PiModelIdentity): boolean {
       "continuation",
       process.env.FM_WORKER_HARNESS || process.env.FM_PI_HARNESS || "pi",
       activeModel,
+      process.env.FM_WORKER_QUOTA_IDENTITY || "",
+      process.env.FM_WORKER_QUOTA_TURN_GATE || "",
     ],
     {
       cwd: root,

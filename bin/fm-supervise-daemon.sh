@@ -619,7 +619,8 @@ fm_daemon_worker_continuation_allowed() {
       fi
       ;;
   esac
-  "$FM_DAEMON_DIR/fm-codex-quota-gate.sh" continuation "$harness" "$model"
+  "$FM_DAEMON_DIR/fm-codex-quota-gate.sh" continuation "$harness" "$model" \
+    "${FM_WORKER_QUOTA_IDENTITY:-}" "${FM_WORKER_QUOTA_TURN_GATE:-}"
 }
 
 pane_is_busy() {  # <target> [backend]

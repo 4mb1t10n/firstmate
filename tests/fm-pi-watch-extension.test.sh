@@ -162,6 +162,7 @@ SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-codex-quota-gate.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
     FM_WORKER_HARNESS=pi FM_WORKER_MODEL=anthropic/claude-sonnet-5 \
+    FM_WORKER_QUOTA_IDENTITY=structured FM_WORKER_QUOTA_TURN_GATE=before-agent-start \
     FM_QUOTA_GATE_LOG="$quota_log" FM_WATCH_REARM_RETRY_BASE_MS=5 \
     FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=1 \
     node --input-type=module 2>&1 <<'EOF'
@@ -193,7 +194,7 @@ for (let i = 0; i < 250 && !existsSync(process.env.FM_QUOTA_GATE_LOG); i += 1) {
 }
 if (!existsSync(process.env.FM_QUOTA_GATE_LOG)) throw new Error("quota gate was not called");
 const args = readFileSync(process.env.FM_QUOTA_GATE_LOG, "utf8").trim();
-if (args !== "continuation pi openai-codex/gpt-5.6-sol") throw new Error(`unexpected quota args: ${args}`);
+if (args !== "continuation pi openai-codex/gpt-5.6-sol structured before-agent-start") throw new Error(`unexpected quota args: ${args}`);
 await new Promise((resolve) => setTimeout(resolve, 50));
 if (prompts !== 0) throw new Error(`quota denial still delivered ${prompts} follow-ups`);
 EOF
@@ -229,6 +230,7 @@ SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-codex-quota-gate.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
     FM_WORKER_HARNESS=pi FM_WORKER_MODEL=anthropic/claude-sonnet-5 \
+    FM_WORKER_QUOTA_IDENTITY=structured FM_WORKER_QUOTA_TURN_GATE=before-agent-start \
     FM_QUOTA_GATE_LOG="$quota_log" FM_WATCH_REARM_RETRY_BASE_MS=5 \
     FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=1 \
     node --input-type=module 2>&1 <<'EOF'
@@ -281,7 +283,7 @@ if (!notification.includes("20% remaining")) {
 }
 if (severity !== "error") throw new Error(`queued turn denial used severity ${severity}`);
 const calls = readFileSync(process.env.FM_QUOTA_GATE_LOG, "utf8").trim().split("\n");
-if (calls.length !== 2 || calls.some((call) => call !== "continuation pi openai-codex/gpt-5.6-sol")) {
+if (calls.length !== 2 || calls.some((call) => call !== "continuation pi openai-codex/gpt-5.6-sol structured before-agent-start")) {
   throw new Error(`unexpected quota checks: ${calls.join(" | ")}`);
 }
 if (!existsSync(`${process.env.FM_HOME}/state/.worker-runtime-identity`)) {

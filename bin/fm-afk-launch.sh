@@ -160,9 +160,10 @@ fm_afk_launch_entry_cmd() {
 fm_afk_launch_daemon_cmd() {  # <captain-target> <captain-backend>
   local captain_target=$1 captain_backend=$2 entry
   entry=$(fm_afk_launch_entry_cmd) || return 1
-  printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_WORKER_HARNESS=%q FM_WORKER_MODEL=%q %q' \
+  printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_WORKER_HARNESS=%q FM_WORKER_MODEL=%q FM_WORKER_QUOTA_IDENTITY=%q FM_WORKER_QUOTA_TURN_GATE=%q %q' \
     "$FM_HOME" "$captain_target" "$captain_backend" \
-    "${FM_WORKER_HARNESS:-}" "${FM_WORKER_MODEL:-default}" "$entry"
+    "${FM_WORKER_HARNESS:-}" "${FM_WORKER_MODEL:-default}" \
+    "${FM_WORKER_QUOTA_IDENTITY:-}" "${FM_WORKER_QUOTA_TURN_GATE:-}" "$entry"
 }
 
 fm_afk_launch_record_write() {  # <backend> <target> <extra>

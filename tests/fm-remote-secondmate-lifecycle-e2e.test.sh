@@ -730,7 +730,11 @@ assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata o
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
 assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"
 assert_grep 'remote_target=fm-remote:' "$PARENT/state/ios.meta" "parent metadata did not record an fm-remote endpoint"
+assert_grep 'quota_identity=structured' "$PARENT/state/ios.meta" "parent metadata omitted structured launch provenance"
+assert_grep 'quota_turn_gate=none' "$PARENT/state/ios.meta" "parent metadata misstated the remote Codex turn-start capability"
 assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta" "remote metadata did not record the pinned Herdr session"
+assert_grep 'quota_identity=structured' "$REMOTE_HOME/state/parent-route/ios.meta" "remote metadata omitted structured launch provenance"
+assert_grep 'quota_turn_gate=none' "$REMOTE_HOME/state/parent-route/ios.meta" "remote metadata misstated the Codex turn-start capability"
 assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
@@ -876,8 +880,6 @@ pass "remote spawn serializes inheritance through launch publication"
 
 # A normal marked parent request traverses SSH, reaches the remote endpoint once,
 # and resolves only after the correlated remote log delta is ingested.
-printf '%s\n' '{"version":1,"codex":{"worker_minimum_percent_remaining":20,"active_worker_action":"drain-at-checkpoint"},"telemetry":{"maximum_snapshot_age_seconds":300,"stale_behavior":"deny"}}' \
-  > "$REMOTE_HOME/config/quota-policy.json"
 publish_healthy_watcher_identity "$REMOTE_HOME/state" "$REMOTE_HOME" "$REMOTE_ROOT/bin/fm-watch.sh"
 ssh_before_send=$(cat "$SSH_COUNT")
 set +e

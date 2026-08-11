@@ -229,7 +229,7 @@ test_native_codex_policy_preserves_only_control_keys() {
   local dir fb home err log rc submitting_key
   dir="$TMP_ROOT/codex-drain"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home codexdrain); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
-  fm_write_meta "$home/state/lane-drain.meta" "window=sess:fm-lane-drain" "kind=ship" "harness=codex" "model=gpt-5.6"
+  fm_write_meta "$home/state/lane-drain.meta" "window=sess:fm-lane-drain" "kind=ship" "harness=codex" "model=gpt-5.6" "quota_identity=structured" "quota_turn_gate=none"
   enable_quota_policy "$home"
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
@@ -271,7 +271,7 @@ test_quota_policy_covers_pi_and_unknown_endpoints() {
   dir="$TMP_ROOT/quota-identities"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home quotaidentities); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
   enable_quota_policy "$home"
-  fm_write_meta "$home/state/lane-pi.meta" "window=sess:fm-lane-pi" "kind=ship" "harness=pi" "model=openai-codex/gpt-5.6-sol"
+  fm_write_meta "$home/state/lane-pi.meta" "window=sess:fm-lane-pi" "kind=ship" "harness=pi" "model=openai-codex/gpt-5.6-sol" "quota_identity=structured" "quota_turn_gate=before-agent-start"
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
     FM_FAKE_CODEX_REMAINING=20 FM_SEND_SETTLE=0 \
@@ -291,8 +291,8 @@ test_quota_policy_covers_pi_and_unknown_endpoints() {
     FM_FAKE_CODEX_REMAINING=100 FM_SEND_SETTLE=0 \
     "$SEND" sess:outside "unclassified turn" >/dev/null 2>"$err"; rc=$?
   expect_code 1 "$rc" "text to an endpoint without harness identity should be denied under the policy"
-  assert_contains "$(cat "$err")" "quota consumption is ambiguous" \
-    "the explicit-endpoint refusal did not name its missing quota identity"
+  assert_contains "$(cat "$err")" "does not prove a structured launch" \
+    "the explicit-endpoint refusal did not name its missing launch provenance"
   [ ! -s "$log" ] || fail "an ambiguous explicit-endpoint text turn still reached the endpoint"
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
@@ -310,7 +310,7 @@ test_endpoint_meta_override_keeps_target_identity_narrow() {
   fb=$(make_stubs "$dir"); home=$(setup_home endpointoverride); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
   mkdir -p "$home/state/parent-route"
   meta="$home/state/parent-route/route.meta"
-  fm_write_meta "$meta" "window=sess:fm-route" "worktree=$home" "project=$home" "kind=secondmate" "harness=claude" "model=claude-sonnet-5"
+  fm_write_meta "$meta" "window=sess:fm-route" "worktree=$home" "project=$home" "kind=secondmate" "harness=claude" "model=claude-sonnet-5" "quota_identity=structured" "quota_turn_gate=none"
   enable_quota_policy "$home"
 
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
@@ -329,6 +329,30 @@ test_endpoint_meta_override_keeps_target_identity_narrow() {
     "the mismatched override refusal did not name both targets"
   [ ! -s "$log" ] || fail "a mismatched endpoint metadata override still attempted delivery"
   pass "fm-send endpoint metadata overrides bind only their exact target"
+}
+
+test_quota_policy_refuses_unproven_legacy_metadata() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/legacy-provenance"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home legacyprovenance); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  enable_quota_policy "$home"
+  fm_write_meta "$home/state/legacy.meta" "window=sess:fm-legacy" "kind=ship" "harness=claude" "model=claude-sonnet-5"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_CODEX_REMAINING=100 FM_SEND_SETTLE=0 \
+    "$SEND" legacy "legacy composite command" >/dev/null 2>"$err"; rc=$?
+  expect_code 1 "$rc" "legacy metadata should not prove a safe quota identity"
+  assert_contains "$(cat "$err")" "relaunch the endpoint with a verified adapter" \
+    "legacy metadata refusal did not explain how to establish provenance"
+  [ ! -s "$log" ] || fail "unproven legacy metadata still reached the endpoint"
+
+  fm_write_meta "$home/state/raw-pi.meta" "window=sess:fm-raw-pi" "kind=ship" "harness=pi" "model=openai-codex/gpt-5.6-sol" "quota_identity=unprotected" "quota_turn_gate=none"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_CODEX_REMAINING=100 FM_SEND_SETTLE=0 \
+    "$SEND" raw-pi "raw Pi continuation" >/dev/null 2>"$err"; rc=$?
+  expect_code 1 "$rc" "raw Pi metadata should not claim a generated turn-start gate"
+  [ ! -s "$log" ] || fail "unprotected raw Pi metadata still reached the endpoint"
+  pass "quota-aware sends require proven endpoint launch provenance"
 }
 
 # A --key send is how firstmate interrupts a worker, so its exit status is the
@@ -370,3 +394,4 @@ test_healthy_fm_id_send_still_works
 test_native_codex_policy_preserves_only_control_keys
 test_quota_policy_covers_pi_and_unknown_endpoints
 test_endpoint_meta_override_keeps_target_identity_narrow
+test_quota_policy_refuses_unproven_legacy_metadata

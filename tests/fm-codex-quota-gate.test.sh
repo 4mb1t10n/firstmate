@@ -56,6 +56,13 @@ run_gate_role() {
     "$GATE" "$role" "$harness" "$model" 2>&1
 }
 
+run_gate_provenance() {
+  local home=$1 role=$2 harness=$3 model=$4 identity=$5 turn_gate=$6
+  shift 6
+  env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$@" \
+    "$GATE" "$role" "$harness" "$model" "$identity" "$turn_gate" 2>&1
+}
+
 run_gate() {
   local home=$1 harness=$2 model=$3
   shift 3
@@ -174,20 +181,20 @@ test_internal_continuations_gate_only_secondmate_workers() {
   calls="$home/quota.calls"
   write_policy "$home"
 
-  out=$(run_gate_role "$home" continuation codex gpt-5 \
+  out=$(run_gate_provenance "$home" continuation codex gpt-5 structured none \
     FM_FAKE_CODEX_REMAINING=20 FM_FAKE_QUOTA_CALLS="$calls"); rc=$?
   expect_code 0 "$rc" "a captain continuation should remain outside the worker reserve"
   [ ! -s "$calls" ] || fail "a captain continuation unnecessarily collected worker quota telemetry"
 
   printf '%s\n' secondmate > "$home/.fm-secondmate-home"
-  out=$(run_gate_role "$home" continuation codex gpt-5 \
+  out=$(run_gate_provenance "$home" continuation codex gpt-5 structured none \
     FM_FAKE_CODEX_REMAINING=100 FM_FAKE_QUOTA_CALLS="$calls"); rc=$?
   expect_code 1 "$rc" "a native Codex secondmate continuation should require a verified turn-start gate"
   assert_contains "$out" "no verified turn-start quota gate" \
     "the native continuation refusal did not name the missing turn boundary"
   [ ! -s "$calls" ] || fail "a native continuation unnecessarily collected telemetry before refusing"
 
-  out=$(run_gate_role "$home" continuation pi openai-codex/gpt-5.6-sol \
+  out=$(run_gate_provenance "$home" continuation pi openai-codex/gpt-5.6-sol structured before-agent-start \
     FM_FAKE_CODEX_REMAINING=20 FM_FAKE_QUOTA_CALLS="$calls"); rc=$?
   expect_code 1 "$rc" "a Pi secondmate continuation should be denied at the reserve"
   assert_contains "$out" "20% remaining" "the Pi secondmate continuation did not reach the worker cutoff"
@@ -200,20 +207,33 @@ test_delivery_requires_verified_turn_start_boundary() {
   calls="$home/quota.calls"
   write_policy "$home"
 
-  out=$(run_gate_role "$home" delivery codex gpt-5 \
+  out=$(run_gate_role "$home" delivery claude claude-sonnet-5 \
+    FM_FAKE_CODEX_REMAINING=100 FM_FAKE_QUOTA_CALLS="$calls"); rc=$?
+  expect_code 1 "$rc" "delivery should deny legacy metadata without launch provenance"
+  assert_contains "$out" "does not prove a structured launch" \
+    "legacy delivery did not name the missing structured identity"
+  [ ! -s "$calls" ] || fail "legacy delivery unnecessarily collected telemetry before refusing"
+
+  out=$(run_gate_provenance "$home" delivery pi openai-codex/gpt-5.6-sol unprotected none \
+    FM_FAKE_CODEX_REMAINING=100 FM_FAKE_QUOTA_CALLS="$calls"); rc=$?
+  expect_code 1 "$rc" "delivery should deny a raw Pi endpoint without trusted provenance"
+  assert_contains "$out" "does not prove a structured launch" \
+    "raw Pi delivery did not name its unprotected identity"
+
+  out=$(run_gate_provenance "$home" delivery codex gpt-5 structured none \
     FM_FAKE_CODEX_REMAINING=100 FM_FAKE_QUOTA_CALLS="$calls"); rc=$?
   expect_code 1 "$rc" "native Codex delivery should be denied without a verified turn-start gate"
   assert_contains "$out" "no verified turn-start quota gate" \
     "native Codex delivery did not name the missing turn boundary"
   [ ! -s "$calls" ] || fail "native Codex delivery unnecessarily collected telemetry before refusing"
 
-  out=$(run_gate_role "$home" delivery pi openai-codex/gpt-5.6-sol \
+  out=$(run_gate_provenance "$home" delivery pi openai-codex/gpt-5.6-sol structured before-agent-start \
     FM_FAKE_CODEX_REMAINING=21 FM_FAKE_QUOTA_CALLS="$calls"); rc=$?
   expect_code 0 "$rc" "Pi Codex delivery should proceed above the reserve for a later live recheck"
   [ -s "$calls" ] || fail "Pi Codex delivery did not collect quota telemetry"
 
   : > "$calls"
-  out=$(run_gate_role "$home" delivery claude claude-sonnet-5 \
+  out=$(run_gate_provenance "$home" delivery claude claude-sonnet-5 structured none \
     FM_FAKE_CODEX_REMAINING=20 FM_FAKE_QUOTA_CALLS="$calls"); rc=$?
   expect_code 0 "$rc" "a verified non-Codex delivery should remain available"
   [ ! -s "$calls" ] || fail "a non-Codex delivery unnecessarily collected Codex telemetry"
